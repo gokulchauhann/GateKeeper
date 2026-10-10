@@ -5,25 +5,24 @@ Server-rendered Jinja2 templates, one stylesheet layer per concern, and small va
 ```
 frontend/
 ├── templates/
-│   ├── base.html                 shared layout: sidebar, navigation, logout, dev-mode banner
+│   ├── base.html                
 │   ├── login.html
-│   ├── macros/layout.html        icons and brand
-│   ├── macros/ui.html            badges, stat cards, usage meters, empty states
+│   ├── macros/layout.html        
+│   ├── macros/ui.html           
 │   ├── tenant/dashboard.html
 │   ├── tenant/customers.html
 │   ├── tenant/orders.html
 │   └── admin/dashboard.html
 ├── static/
-│   ├── css/base.css              tokens, app shell, buttons, forms, sign-in page
-│   ├── css/dashboard.css         cards, tables, badges, meters, responsive rules
+│   ├── css/base.css             
+│   ├── css/dashboard.css         
 │   └── js/
-│       ├── app.js                shared helpers (window.GK)
-│       ├── login.js              show/hide password, double-submit guard
-│       ├── tenant.js             "Generate heavy report" action
-│       └── admin.js              usage refresh (Phase III adds polling on top)
-├── dev_server.py                 DEVELOPMENT ONLY: serves the pages on localhost
-└── dev_data.py                   DEVELOPMENT ONLY: sample tenants, users, customers, orders
-```
+│       ├── app.js               
+│       ├── login.js              
+│       ├── tenant.js             
+│       └── admin.js              
+├── dev_server.py                
+└── dev_data.py                   
 
 ## Run it locally
 
