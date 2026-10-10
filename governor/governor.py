@@ -43,7 +43,7 @@ class TenantGovernor:
                 )
             return self._pools[tenant_id]
 
-def get_connection(self, tenant_id):
+    def get_connection(self, tenant_id):
     try:
         tenant_id = str(int(tenant_id))   # rejects things like "../x"
         tenant_pool = self._get_pool(tenant_id)
@@ -57,7 +57,7 @@ def get_connection(self, tenant_id):
         raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
     return conn
 
-def release_connection(self, tenant_id, conn):
+    def release_connection(self, tenant_id, conn):
     self._pools[str(int(tenant_id))].putconn(conn)
 
 
