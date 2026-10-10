@@ -9,7 +9,9 @@ CPU_PERIOD_US = 100000
 load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-
+class GovernorConnectionError(Exception):
+    pass
+    
 def create_cgroup(tenant_id: str, cpu_quota_percent: int) -> str:
     path = os.path.join(CGROUP_ROOT, f"gatekeeper-tenant_{tenant_id}")
     os.makedirs(path, exist_ok=True)
@@ -31,7 +33,6 @@ class TenantGovernor:
         self._minconn = minconn
         self._maxconn = maxconn
         self._pools = {}
-        self._assigned_pids = set()
         self._lock = threading.Lock()
 
     def _get_pool(self, tenant_id: str):
@@ -42,21 +43,22 @@ class TenantGovernor:
                 )
             return self._pools[tenant_id]
 
-    def get_connection(self, tenant_id: str):
+def get_connection(self, tenant_id):
+    try:
+        tenant_id = str(int(tenant_id))   # rejects things like "../x"
         tenant_pool = self._get_pool(tenant_id)
         conn = tenant_pool.getconn()
-        pid = conn.info.backend_pid
+    except Exception as e:
+        raise GovernorConnectionError(f"no connection for tenant {tenant_id}") from e
+    try:
+        assign_pid(create_cgroup(tenant_id, 20), conn.info.backend_pid)
+    except Exception as e:
+        tenant_pool.putconn(conn, close=True)
+        raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
+    return conn
 
-        if pid not in self._assigned_pids:
-            try:
-                cgroup_path = create_cgroup(tenant_id, 20)
-                assign_pid(cgroup_path, pid)
-            except Exception:
-                tenant_pool.putconn(conn, close=True)
-                raise
-            self._assigned_pids.add(pid)
-
-        return conn
+def release_connection(self, tenant_id, conn):
+    self._pools[str(int(tenant_id))].putconn(conn)
 
 
 def cgroup_of(pid: int) -> str:
