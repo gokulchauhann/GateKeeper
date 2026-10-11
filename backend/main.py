@@ -4,7 +4,8 @@ Gatekeeper backend.
 Run from the repository root:
     uvicorn backend.main:app --reload --port 8000
 
-Step 1: login and logout. Tenant and admin pages come in the next steps.
+Step 2: login, logout and tenant pages. The admin page and the heavy report
+come in step 3. Set GOVERNOR=stub (default) or GOVERNOR=real in .env.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.templating import Jinja2Templates  # noqa: E402
 
-from backend import auth, db  # noqa: E402
+from backend import auth, db, tenant_data  # noqa: E402
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 WARN_RATIO = 0.9  # usage at or above 90% of quota shows as "Near limit"
@@ -64,7 +65,7 @@ def require(request: Request, role: str):
 def render(request: Request, template: str, status_code: int = 200, **context):
     base = {
         "user": current_user(request),
-        "governor_mode": "stub",   # becomes "enforced" when the real Governor is wired in
+        "governor_mode": tenant_data.GOVERNOR_MODE,  # "enforced" only with the real Governor
         "data_source": "database",
         "warn_ratio": WARN_RATIO,
         "dev_mode": False,         # never true in the real backend
@@ -118,16 +119,41 @@ def logout(request: Request):
     return response
 
 
-# ---------- Temporary placeholders (replaced in step 2) ----------
+# ---------- Tenant pages ----------
 
 @app.get("/tenant")
-def tenant_placeholder(request: Request):
+def tenant_dashboard(request: Request):
     user, response = require(request, "tenant")
     if response:
         return response
-    return PlainTextResponse(f"Signed in as {user['username']} "
-                             f"(tenant {user['tenant']['name']}, plan {user['tenant']['plan']}).")
+    tenant = user["tenant"]
+    return render(request, "tenant/dashboard.html", active_page="dashboard", tenant=tenant,
+                  usage=tenant_data.tenant_usage(tenant["id"]),
+                  report_url="/tenant/report",
+                  **tenant_data.dashboard_data(tenant["id"]))
 
+
+@app.get("/tenant/customers")
+def tenant_customers(request: Request):
+    user, response = require(request, "tenant")
+    if response:
+        return response
+    tenant = user["tenant"]
+    return render(request, "tenant/customers.html", active_page="customers", tenant=tenant,
+                  customers=tenant_data.customers(tenant["id"]))
+
+
+@app.get("/tenant/orders")
+def tenant_orders(request: Request):
+    user, response = require(request, "tenant")
+    if response:
+        return response
+    tenant = user["tenant"]
+    return render(request, "tenant/orders.html", active_page="orders", tenant=tenant,
+                  **tenant_data.orders_page(tenant["id"]))
+
+
+# ---------- Temporary placeholder (replaced in step 3) ----------
 
 @app.get("/admin")
 def admin_placeholder(request: Request):
