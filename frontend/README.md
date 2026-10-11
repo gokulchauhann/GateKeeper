@@ -27,7 +27,7 @@ frontend/
 
 ## Run it locally
 
-`backend/main.py` has no login, tenant or admin routes yet, so the pages are served by a development-only server. From the repository root:
+The real backend (`backend/main.py`) now serves these templates; see the main README to run it. The development-only server below still works for frontend work without a database. From the repository root:
 
 ```bash
 pip install -r requirements.txt
@@ -47,7 +47,7 @@ templates = Jinja2Templates(directory="frontend/templates")
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 ```
 
-Templates are rendered with `templates.TemplateResponse(request, "<template>", context)`. The routes and context below are what `frontend/dev_server.py` uses; they are a proposal to agree with the backend owner, not an existing API.
+Templates are rendered with `templates.TemplateResponse(request, "<template>", context)`. The routes and context below are what `frontend/dev_server.py` uses. The real backend implements the same routes and context (see `docs/interface-contract.md`).
 
 ### Context on every page
 
@@ -83,10 +83,17 @@ A **usage sample** is exactly the `Governor.get_tenant_usage()` shape from `docs
 
 Errors should return a non-2xx status with `{"detail": "message"}`; the pages show that message.
 
-## Still waiting on the backend
+## Backend status (Phase 2)
+
+Done in `backend/`: bcrypt login and server-side sessions, customers/orders pages from the database through the Governor, the heavy report, `GET /admin/usage`, and plan tiers and quotas on the admin page. Still open for Phase 3: live polling and the chart, the throttle-event log, and plan changes from the admin page.
+
+<details><summary>Original list (kept for history)</summary>
+
 
 - Real login with bcrypt-hashed passwords from the `users` table, and server-side sessions.
 - `customers` and `orders` tables (not in `db/schema.sql` yet) and the routes that read them through `Governor.get_connection()`.
 - The heavy report query, run through the Governor.
 - `GET /admin/usage` reading `usage_events` / `throttle_events`.
 - Plan tier and quota per tenant on the admin page (`tenants` joined with `plan_tiers`).
+
+</details>
