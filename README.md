@@ -1,99 +1,204 @@
-# GateKeeper frontend
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+![PostgreSQL](https://img.shields.io/badge/postgresql-14+-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Status](https://img.shields.io/badge/status-phase%202-yellow.svg)
 
-Server-rendered Jinja2 templates, one stylesheet layer per concern, and small vanilla JavaScript files. No build step and no frontend framework.
+# Gatekeeper
+
+**A cgroup-aware, multi-tenant database connection governor for kernel-level resource isolation.**
+
+Gatekeeper tackles the "noisy neighbour" problem on a shared PostgreSQL database with Linux cgroups v2 instead of software-level timeouts or rate limits. Each tenant's database connections are tied to their real operating system backend processes, and those processes are placed in a cgroup for that tenant, so the kernel scheduler enforces the tenant's CPU and memory limits. It is built as a small multi-tenant web application with tenant and admin logins, so the mechanism can be shown live: one tenant runs a heavy report while the other tenants keep working normally.
+
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [How It Works](#how-it-works)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Project Status](#project-status)
+- [Scope & Limitations](#scope--limitations)
+- [Future Work](#future-work)
+- [Team](#team)
+- [References](#references)
+- [License](#license)
+
+---
+
+## The Problem
+
+Multi-tenant SaaS applications often share one database instance across many customers to keep costs down. This exposes the "noisy neighbour" problem: one tenant's heavy query, such as a large report or an unindexed join, can starve every other tenant on that database.
+
+Common mitigations (query timeouts, connection limits, application-level rate limiting) are **soft**. They react after a query has already started using resources, and they rely on the application predicting bad behaviour. None of them caps what a tenant's database work can consume at the operating system level.
+
+## How It Works
+
+PostgreSQL starts a dedicated operating system process for every client connection, and psycopg2 exposes that process's PID (`conn.info.backend_pid`, the same value as `SELECT pg_backend_pid()`). Gatekeeper's **Governor** uses this:
+
+1. **Per-tenant pools.** Each tenant has its own connection pool, so a connection, and its backend process, is only ever used by one tenant. A request borrows a connection and returns it; the next request may get a different connection from the same pool, but every one of them belongs to that tenant.
+2. **Limits from the plan tier.** On a tenant's first connection, the Governor reads the tenant's plan (`basic` 20% CPU / 256 MB, `pro` 50% / 1024 MB, `enterprise` 100% / 4096 MB) and creates `/sys/fs/cgroup/gatekeeper-tenant_<id>` with `cpu.max` and `memory.high`.
+3. **PID into the cgroup.** On every checkout, the connection's backend PID is written into the tenant's `cgroup.procs`. From then on the **kernel scheduler** throttles that process, whatever the application does.
+4. **Usage.** `get_tenant_usage()` turns the cgroup's `cpu.stat` and `memory.current` counters into CPU %, memory and throttled time, which the admin dashboard shows.
+
+Two details matter for correctness:
+- **Parallel query is turned off for tenant queries** (`SET LOCAL max_parallel_workers_per_gather = 0`). Parallel workers are separate Postgres processes outside the tenant's cgroup and would let a heavy query escape its limit.
+- **Admin and login queries use a separate plain connection**, so the operator's own queries never run inside a tenant's cgroup.
+
+See [`docs/architecture.md`](docs/architecture.md) for the full design and [`docs/interface-contract.md`](docs/interface-contract.md) for the exact interfaces.
+
+## Architecture
 
 ```
-frontend/
-├── templates/
-│   ├── base.html                 shared layout: sidebar, navigation, logout, dev-mode banner
-│   ├── login.html
-│   ├── macros/layout.html        icons and brand
-│   ├── macros/ui.html            badges, stat cards, usage meters, empty states
-│   ├── tenant/dashboard.html
-│   ├── tenant/customers.html
-│   ├── tenant/orders.html
-│   └── admin/dashboard.html
-├── static/
-│   ├── css/base.css              tokens, app shell, buttons, forms, sign-in page
-│   ├── css/dashboard.css         cards, tables, badges, meters, responsive rules
-│   └── js/
-│       ├── app.js                shared helpers (window.GK)
-│       ├── login.js              show/hide password, double-submit guard
-│       ├── tenant.js             "Generate heavy report" action
-│       └── admin.js              usage refresh (Phase III adds polling on top)
-├── dev_server.py                 DEVELOPMENT ONLY: serves the pages on localhost
-└── dev_data.py                   DEVELOPMENT ONLY: sample tenants, users, customers, orders
+Tenant Browser (Login)        Admin Browser (Login)
+       │                              │
+       └──────────► FastAPI Backend ◄─┘
+                 (sessions, tenant + admin routes)
+          │ tenant data                   │ login, admin, usage tables
+          ▼                               ▼
+   Governor (TenantGovernor)        plain connection pool
+   - one psycopg2 pool per tenant
+   - limits from plan_tiers
+   - backend PID → tenant cgroup
+          │
+          ▼
+   Linux cgroups v2: gatekeeper-tenant_<id>
+   (cpu.max, memory.high, cpu.stat, memory.current)
+          │
+          ▼
+   PostgreSQL backend processes (confined per tenant)
+
+   Monitor thread (real mode): get_tenant_usage() every 2 s
+   → usage_events / throttle_events → admin dashboard
 ```
 
-## Run it locally
+## Tech Stack
 
-The real backend (`backend/main.py`) now serves these templates; see the main README to run it. The development-only server below still works for frontend work without a database. From the repository root:
+| Technology | Role |
+|---|---|
+| Python 3.10+ | Backend and Governor |
+| FastAPI + uvicorn | Web framework: auth, tenant and admin routes |
+| psycopg2 | PostgreSQL driver and per-tenant connection pools |
+| bcrypt | Password hashing |
+| PostgreSQL 14+ | Tenant data (customers, orders) and metadata (plans, usage) |
+| Linux cgroups v2 | Kernel-level CPU and memory limits per tenant |
+| Jinja2 + vanilla JavaScript | Server-rendered pages; Chart.js planned for Phase 3 |
+
+## Getting Started
+
+### Two modes
+
+| `GOVERNOR=` in `.env` | Runs on | What happens |
+|---|---|---|
+| `stub` (default) | Any machine with Python and PostgreSQL | Plain connections, no cgroups. Usage numbers are random, and every page shows a "not enforced" banner. For development. |
+| `real` | Linux, WSL2 or GitHub Codespaces with cgroups v2, run as **root** | Tenant connections go into their cgroups and limits are enforced by the kernel. |
+
+cgroups v2 does not exist on native Windows or macOS. Our Phase 2 real-mode run worked in a GitHub Codespace with `sudo`; other containers may not allow creating cgroups, so check with `sudo mkdir /sys/fs/cgroup/gk-test` (and `rmdir` it afterwards).
+
+### Setup (Ubuntu, WSL2 or GitHub Codespaces)
 
 ```bash
+git clone https://github.com/gokulchauhann/GateKeeper.git
+cd GateKeeper
+
+# PostgreSQL
+sudo apt-get update && sudo apt-get install -y postgresql
+sudo service postgresql start
+sudo runuser -u postgres -- psql -c "ALTER USER postgres PASSWORD 'choose-a-local-password';"
+sudo runuser -u postgres -- createdb gatekeeper
+sudo runuser -u postgres -- psql -d gatekeeper < db/schema.sql
+sudo runuser -u postgres -- psql -d gatekeeper < db/demo_data.sql
+
+# Python
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-uvicorn frontend.dev_server:app --reload --port 8000
+
+# Configuration (never commit .env)
+cp .env.example .env
+# edit .env: DATABASE_URL=postgresql://postgres:<your-password>@localhost:5432/gatekeeper
+
+# Demo data: 4 tenants, 5 users, 500 customers and 100,000 orders per tenant
+python db/seed.py            # add --reset to wipe and reseed
 ```
 
-Open http://127.0.0.1:8000/login. Test accounts are in `frontend/dev_data.py`.
+`sudo runuser -u postgres --` is used instead of `sudo -u postgres` because some environments (Codespaces) allow password-free sudo only as root.
 
-The dev server takes usage numbers from `governor/stub_governor.py`, so they are random and **no cgroup limits are applied**. Every page shows a banner saying so. Customers and orders are sample data because `db/schema.sql` has no tables for them yet.
+### Run
 
-## What the real backend needs to provide
-
-To use these templates, `backend/main.py` needs:
-
-```python
-templates = Jinja2Templates(directory="frontend/templates")
-app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+**Stub mode (any machine):**
+```bash
+uvicorn backend.main:app --port 8000
 ```
 
-Templates are rendered with `templates.TemplateResponse(request, "<template>", context)`. The routes and context below are what `frontend/dev_server.py` uses. The real backend implements the same routes and context (see `docs/interface-contract.md`).
+**Real mode (Linux/WSL2):** set `GOVERNOR=real` in `.env`, then run as root, because writing to `/sys/fs/cgroup` needs it:
+```bash
+sudo ./venv/bin/uvicorn backend.main:app --port 8000
+```
 
-### Context on every page
+Behind a proxy that serves the app over https (for example Codespaces port forwarding), add `--host 0.0.0.0 --forwarded-allow-ips "*"`.
 
-| Key | Type | Meaning |
-|---|---|---|
-| `user` | dict or `None` | `username`, `role` (`"tenant"` / `"admin"`), `tenant` (tenant dict, `None` for admin) |
-| `active_page` | str | `dashboard`, `customers`, `orders` or `admin`; highlights the nav link |
-| `governor_mode` | str | `"stub"` shows the development banner and "Not enforced" labels. Set `"enforced"` **only** when the real Governor has assigned the session to its cgroup. |
-| `data_source` | str | `"development"` shows a "Sample data" label on customers and orders |
-| `warn_ratio` | float | Usage share of quota shown as "Near limit" (dev server: `0.9`) |
+Open http://127.0.0.1:8000/login. Demo accounts (local demo data only): `acme` / `acme-dev`, `globex` / `globex-dev`, `initech` / `initech-dev`, `umbrella` / `umbrella-dev`, and `admin` / `admin-dev`.
 
-A **tenant dict** is a `tenants` row joined with its `plan_tiers` row: `id`, `name`, `plan`, `cpu_quota_percent`, `memory_limit_mb`.
+**Governor self-test (real mode, after seeding):**
+```bash
+sudo ./venv/bin/python governor/governor.py
+```
+It prints each connection's PID and cgroup, each tenant's `cpu.max` and `memory.high`, rejects an unknown tenant, and prints one usage sample.
 
-A **usage sample** is exactly the `Governor.get_tenant_usage()` shape from `docs/interface-contract.md`: `tenant_id`, `cpu_percent`, `memory_used_mb`, `throttled_ms`, `timestamp`.
+**Frontend only, without a database:** `uvicorn frontend.dev_server:app --reload --port 8000` (see [`frontend/README.md`](frontend/README.md)).
 
-### Pages
+## Project Status
 
-| Route | Template | Extra context |
-|---|---|---|
-| `GET /login`, `POST /login` | `login.html` | `error` (str, on failure), `username` (to refill the field). Form fields: `username`, `password`. |
-| `POST /logout` | (redirect) | |
-| `GET /tenant` | `tenant/dashboard.html` | `tenant`, `usage` (sample or `None` if no open session), `customer_count`, `order_count`, `recent_orders`, `report_url` |
-| `GET /tenant/customers` | `tenant/customers.html` | `tenant`, `customers`: `id`, `name`, `email`, `status` (`active`/`inactive`), `created_at` |
-| `GET /tenant/orders` | `tenant/orders.html` | `tenant`, `orders`: `id`, `customer`, `amount`, `status`, `created_at`; `summary`: `count`, `revenue`, `open` |
-| `GET /admin` | `admin/dashboard.html` | `rows`: `{tenant, usage, status}` where status is `healthy`/`warning`/`throttled`/`idle`; `summary`: `total`, `active`, `throttled`, `avg_cpu`; `updated_at`; `usage_url` |
+Currently in **Phase 2: Core Development**.
 
-### JSON endpoints used by JavaScript
+- [x] Problem definition and architecture design
+- [x] Manual cgroup + PID validation, done twice on real PostgreSQL backends ([`docs/cgroups-notes.md`](docs/cgroups-notes.md), [`docs/cgroup-validation.md`](docs/cgroup-validation.md))
+- [x] Metadata schema, demo data tables and seed script
+- [x] Interface contract and stub Governor
+- [x] Tenant and admin UI
+- [x] Backend: bcrypt login and sessions, tenant pages, heavy report, admin page, `/admin/usage` (tested in stub mode)
+- [x] Governor: per-tenant pools, plan-tier limits, `memory.high`, PID assignment, `get_tenant_usage()`
+- [x] End-to-end run in real mode: the heavy report took 4,224 ms without a limit and 17,365 ms under a 20% cgroup; the admin page showed 20.0% / 20% CPU while it ran ([`docs/phase2-results.md`](docs/phase2-results.md))
+- [ ] Noisy-neighbour comparison: another tenant's response time with enforcement on and off (Phase 3)
+- [ ] Live admin chart and throttle-event log (Phase 3)
+- [ ] Plan-tier changes from the admin page without a restart (Phase 3)
+- [ ] Noisy-neighbour demo with and without enforcement, testing and rehearsal (Phase 3)
 
-- **`GET /admin/usage`**: list of usage samples, as defined in `docs/interface-contract.md`. Used by the admin page's Refresh button and, in Phase III, by polling.
-- **Heavy report** (`POST` to `report_url`; the dev server uses `/tenant/report`): returns
-  `{"status": "completed", "duration_ms": int, "rows": [{"month", "orders", "revenue"}], "cgroup_enforced": bool}`.
-  The UI only says the query was limited by a cgroup when `cgroup_enforced` is `true`.
+## Scope & Limitations
 
-Errors should return a non-2xx status with `{"detail": "message"}`; the pages show that message.
+- **PostgreSQL only.** MySQL runs connections as threads inside one process, so there is no per-connection process to put in a cgroup.
+- **No transparent wire-protocol proxy (yet).** Clients use the FastAPI backend, which routes tenant queries through the Governor. An external application cannot yet connect to Gatekeeper as a drop-in Postgres server.
+- **Single-machine demo** with simulated tenants, not a production deployment.
+- **Per-tenant pools are required.** Isolation depends on a connection never being shared between tenants; cross-tenant transaction pooling (as in PgBouncer's transaction mode) would break the PID-to-tenant mapping.
+- **`cpu.max` is a ceiling, not a reservation.** It stops one tenant taking too much, but does not add capacity. Proportional sharing with `cpu.weight` is future work.
+- **Limits are read once per tenant.** A plan change takes effect after a restart until the Phase 3 "re-apply limits" step is built.
+- **Real mode runs the backend as root**, because of the cgroup writes. Moving those writes into a small privileged helper or a delegated cgroup subtree is future work.
 
-## Backend status (Phase 2)
+## Future Work
 
-Done in `backend/`: bcrypt login and server-side sessions, customers/orders pages from the database through the Governor, the heavy report, `GET /admin/usage`, and plan tiers and quotas on the admin page. Still open for Phase 3: live polling and the chart, the throttle-event log, and plan changes from the admin page.
+- **Transparent Postgres wire-protocol proxy**, so any application can point at Gatekeeper with a normal connection string.
+- **Predictive throttling** using `EXPLAIN (FORMAT JSON)` cost estimates.
+- **I/O limits** with the cgroups v2 `io` controller.
+- **Least privilege:** cgroup writes through a delegated subtree or a small helper instead of running the web app as root.
 
-<details><summary>Original list (kept for history)</summary>
+## Team
 
+**Team Cosmos (T060)**: Graphic Era (Deemed to be University), Dehradun. Mentor: Dr. Neeraj Kumar Pandey.
 
-- Real login with bcrypt-hashed passwords from the `users` table, and server-side sessions.
-- `customers` and `orders` tables (not in `db/schema.sql` yet) and the routes that read them through `Governor.get_connection()`.
-- The heavy report query, run through the Governor.
-- `GET /admin/usage` reading `usage_events` / `throttle_events`.
-- Plan tier and quota per tenant on the admin page (`tenants` joined with `plan_tiers`).
+| Name | Role |
+|---|---|
+| Gokul Singh | Team lead. Schema and demo data, interface contract, backend, Governor Phase 2 extensions, manual cgroup validation, documentation |
+| Rohit Singh | Governor core (cgroup creation, PID assignment, `TenantGovernor` with per-tenant pools), independent cgroup validation |
+| Yuvraj Singh | Frontend: login, tenant and admin pages, development server |
+| Kanak Bhatia | Member |
 
-</details>
+## References
+
+- [PostgreSQL Documentation: System Information Functions (`pg_backend_pid`)](https://www.postgresql.org/docs/current/functions-info.html)
+- [The Linux Kernel Documentation: Control Group v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
