@@ -4,7 +4,7 @@
 
 ## Governor.get_connection(tenant_id: str)
 
-Returns a `psycopg2` connection object, pooled per tenant (**session pooling** — the same connection/backend process is retained for the tenant's session, never reused by a different tenant mid-session).
+Returns a `psycopg2` connection object from that tenant's own pool. Pooling is **per tenant**: each tenant has its own pool, so a connection (and therefore its PostgreSQL backend process) is only ever used by that one tenant. A request borrows a connection and returns it; the tenant's next request may get a different connection from the same pool (up to 5), but every one of them is in that tenant's cgroup. A connection is never handed to another tenant, unlike PgBouncer's transaction pooling, which would break the PID-to-cgroup mapping.
 
 On first connection for a tenant, the Governor looks up the tenant's plan tier and CPU/memory limits from the `tenants` and `plan_tiers` tables (see [`db/schema.sql`](../db/schema.sql)), and assigns the connection's real PostgreSQL backend PID (via `pg_backend_pid()`) into that tenant's Linux cgroup accordingly.
 
@@ -30,7 +30,7 @@ Reads the tenant's current `cpu.stat` and `memory.current` from its cgroup and r
   "timestamp": "ISO8601 string"
 }
 ```
-Used internally by the Governor's background monitor to write rows into the `usage_events` and `throttle_events` tables (see [`db/schema.sql`](../db/schema.sql)), which the admin dashboard reads from.
+Called every 2 seconds by the backend's monitor thread (`backend/usage.py`, real mode only), which writes rows into the `usage_events` and `throttle_events` tables (see [`db/schema.sql`](../db/schema.sql)), which the admin dashboard reads from.
 
 ---
 
@@ -77,7 +77,7 @@ Returns JSON, sourced from the `usage_events` and `throttle_events` tables:
 - **System connection** (a plain `psycopg2` connection or small pool, *not* through the Governor): login, reading `users`/`tenants`/`plan_tiers`, writing and reading `usage_events`/`throttle_events`, all admin pages. This keeps the admin's own queries out of any tenant's cgroup.
 - **Tenant connection** (`governor.get_connection(tenant_id)` / `release_connection`): every query on `customers` and `orders`, including the heavy report. Always release in a `finally:` block. Every query must filter by `tenant_id`.
 
-**Authentication:** form login (fields `username`, `password`), checked with `bcrypt.checkpw` against `users.password_hash`. Session is a random token in an `httponly`, `samesite=lax` cookie, mapped server-side to the user id. `SESSION_SECRET` comes from `.env`. Tenant routes require role `tenant`; admin routes require role `admin`.
+**Authentication:** form login (fields `username`, `password`), checked with `bcrypt.checkpw` against `users.password_hash`. Session is a random token in an `httponly`, `samesite=lax` cookie, mapped server-side to the user id (in memory, so a restart signs everyone out). No signing secret is needed for this, so `SESSION_SECRET` in `.env` is currently unused. Tenant routes require role `tenant`; admin routes require role `admin`.
 
 **Routes** (templates and context exactly as in `frontend/README.md`):
 
@@ -88,12 +88,13 @@ Returns JSON, sourced from the `usage_events` and `throttle_events` tables:
 | `GET /tenant` | `tenant/dashboard.html` |
 | `GET /tenant/customers` | `tenant/customers.html` (latest customers; paginate or limit, there are 500 per tenant) |
 | `GET /tenant/orders` | `tenant/orders.html` (latest 50 orders; `summary` computed in SQL over all of the tenant's orders) |
-| `POST /tenant/report` | JSON `{"status": "completed", "duration_ms": int, "rows": [{"month", "orders", "revenue"}], "cgroup_enforced": bool}` |
+| `POST /tenant/report` | JSON `{"status": "completed", "duration_ms": int, "rows": [{"month", "orders", "revenue", "repeat_orders"}], "governor_mode": str, "cgroup_enforced": bool}` (`repeat_orders` is extra; the page ignores it) |
 | `GET /admin` | `admin/dashboard.html` |
 | `GET /admin/usage` | JSON list, **one latest sample per tenant**, shape as in `GET /admin/usage` above |
 
 - `governor_mode` is `"enforced"` and `cgroup_enforced` is `true` **only** when the request used the real Governor. With the stub they are `"stub"` and `false`.
 - `dev_mode` is never true in the real backend.
+- The monitor writes a cycle's `usage_events` and `throttle_events` rows in one transaction, so they share the same `NOW()` timestamp; `/admin/usage` joins them on `tenant_id` and that timestamp. A tenant with no sample in the last 10 seconds is idle and left out.
 - Errors: non-2xx status with `{"detail": "message"}`. A `GovernorConnectionError` becomes HTTP 503 with a readable message, never an unhandled 500.
 
 **Choosing the Governor:** set `GOVERNOR=real` or `GOVERNOR=stub` in `.env` (default `stub`), so the backend can be built and tested on any laptop and switched to the real Governor on a WSL/Linux machine running as root.

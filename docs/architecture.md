@@ -20,14 +20,14 @@ The core idea the whole architecture is built around: **PostgreSQL forks a dedic
                         │
                         ▼
               Governor Module (Python)
-   - per-tenant connection pool (psycopg2, session pooling)
-   - on new connection: call pg_backend_pid()
-   - assign/confirm PID → tenant's cgroup
-   - poll cgroup stat files for usage/throttle data
+   - per-tenant connection pool (psycopg2; a connection never crosses tenants)
+   - first connection: read limits from plan_tiers, create the cgroup
+   - every checkout: backend PID → tenant's cgroup.procs
+   - get_tenant_usage(): cpu.stat / memory.current deltas
                         │
                         ▼
           Linux cgroups v2 (per-tenant group)
-        cpu.max · memory.max · cpu.stat · memory.current
+        cpu.max · memory.high · cpu.stat · memory.current
                         │
                         ▼
      PostgreSQL backend process (per tenant session,
@@ -53,27 +53,29 @@ A separate login surface for the platform operator. Displays, per tenant:
 - Current plan tier and configured CPU/memory quota.
 - Live resource usage, refreshed via periodic polling (JavaScript `setInterval` + `fetch`, roughly every 1–2 seconds) against the backend's usage endpoint.
 - A timestamped log of throttling events.
-- A control to change a tenant's plan tier, which updates their cgroup limits dynamically.
+- (Phase 3) A control to change a tenant's plan tier, which will update their cgroup limits without a restart.
 
 ### 3.3 FastAPI Backend
 The single entry point for both frontends. Responsibilities:
-- Session-based authentication for both tenant and admin users (password hashing via bcrypt; session token stored in a cookie, validated server-side on each request).
-- Tenant-facing routes that need database access call into the Governor rather than opening database connections directly.
-- Admin-facing routes expose aggregated usage/throttle data sourced from the Governor and the metadata database.
+- Session-based authentication for both tenant and admin users (passwords checked with bcrypt; a random session token in an `httponly` cookie, mapped to the user server-side).
+- Two kinds of database connection. Tenant data (customers, orders, the heavy report) goes through the Governor. Login, admin pages and the usage tables use a separate plain connection pool (`backend/db.py`), so the admin's own queries never run inside a tenant's cgroup.
+- Every tenant transaction runs `SET LOCAL max_parallel_workers_per_gather = 0`. Parallel query workers are separate Postgres processes started by the server, so they would not be in the tenant's cgroup; turning them off keeps the tenant's whole query inside its confined backend.
+- A background monitor thread (`backend/usage.py`, real mode only) calls `governor.get_tenant_usage()` every 2 seconds and stores samples in `usage_events` and `throttle_events`.
+- `GOVERNOR=stub` (default) or `GOVERNOR=real` in `.env` selects the Governor, so the app can be developed on any machine and run with enforcement on Linux.
 
 The backend does not implement any database wire protocol itself — it is a normal web application server. It does not currently expose Gatekeeper as a transparent proxy that external applications could connect to directly (see [Future Work](#6-known-limitations--future-work)).
 
 ### 3.4 Governor Module
 The core of the system, and the component that bridges the application layer and the operating system. Responsibilities:
-1. **Connection pooling per tenant**, using `psycopg2.pool`. Pooling is **session-based**: once a tenant's request checks out a connection, that same connection (and therefore the same PostgreSQL backend process) is retained for the tenant's session, rather than being reused by a different tenant mid-session as transaction-level pooling would allow. This is a deliberate, necessary design choice — if a connection's underlying PID could be reassigned to a different tenant mid-session, the PID-to-cgroup mapping would silently become incorrect.
-2. **PID discovery.** On establishing a new pooled connection for a tenant, the Governor executes `SELECT pg_backend_pid();` on that connection to obtain the real OS process ID handling it.
-3. **Cgroup assignment.** The Governor writes that PID into the tenant's designated cgroup (`/sys/fs/cgroup/gatekeeper-tenant_<id>/cgroup.procs`) and sets the cgroup's `cpu.max` (and, later, `memory.max`) from the tenant's plan tier. At present the CPU limit is a fixed 20%; reading limits from `plan_tiers` and setting `memory.max` are the next steps.
-4. **Usage/throttle monitoring.** The Governor periodically reads each tenant's `cpu.stat` (for `nr_throttled` / `throttled_usec`) and `memory.current`, and writes usage snapshots and throttle events to the metadata database for the admin dashboard to display.
+1. **Connection pooling per tenant**, using psycopg2's `ThreadedConnectionPool` (thread-safe, because FastAPI serves requests on several threads). Pooling is **per tenant**: each tenant has its own pool, so a connection (and therefore its PostgreSQL backend process) is only ever used by that one tenant. A request borrows a connection and returns it; the tenant's next request may get a different connection from the same pool (up to 5), but every one of them is in that tenant's cgroup. A connection is never handed to another tenant, unlike PgBouncer's transaction pooling, which would break the PID-to-cgroup mapping.
+2. **PID discovery.** The Governor reads `conn.info.backend_pid`, which psycopg2 gets from libpq. It is the same number `SELECT pg_backend_pid();` returns, without an extra query.
+3. **Cgroup assignment.** On a tenant's first connection the Governor reads `cpu_quota_percent` and `memory_limit_mb` from `tenants` joined with `plan_tiers` (an unknown tenant is rejected before any cgroup exists), creates `/sys/fs/cgroup/gatekeeper-tenant_<id>`, and writes `cpu.max` and `memory.high`. On every checkout it writes the connection's PID into `cgroup.procs`, so a connection that Postgres replaced is confined too. All of a tenant's backends share one cgroup, so the limit applies to the tenant as a whole.
+4. **Usage numbers.** `get_tenant_usage()` reads `cpu.stat` and `memory.current`. `cpu.stat` holds running totals, so it keeps the previous reading per tenant and reports the difference: CPU % = Δ`usage_usec` ÷ elapsed time × 100, throttled ms = Δ`throttled_usec` ÷ 1000. The backend's monitor stores these samples.
 
 ### 3.5 Linux cgroups v2
 The actual enforcement mechanism, provided by the kernel. Each tenant is assigned one cgroup, configured with:
 - `cpu.max` — a hard CPU time ceiling per scheduling period (e.g., `20000 100000` caps the group to 20% of one core).
-- `memory.max` — a hard memory ceiling in bytes.
+- `memory.high` — a memory threshold in bytes. Above it the kernel reclaims memory and slows the group down. We use it instead of `memory.max` (a hard limit), because hitting `memory.max` can get a backend killed by the OOM killer, and Postgres then restarts every connection, which would hurt all tenants.
 
 Once a process's PID is written into a cgroup's `cgroup.procs` file, the kernel scheduler enforces these limits directly on that process. No application code monitors or intervenes at query-execution time — the enforcement is physical, not advisory.
 
@@ -91,10 +93,10 @@ Using the example of a tenant clicking "Generate Report":
 1. The tenant's browser sends the request to the FastAPI backend, with their session cookie.
 2. The backend validates the session and identifies the tenant.
 3. The backend calls `governor.get_connection(tenant_id)`.
-4. The Governor either returns an existing pooled connection for that tenant, or opens a new one — and if new, immediately retrieves its backend PID and ensures that PID is placed in the tenant's cgroup.
+4. The Governor takes a connection from that tenant's pool (opening one if needed), reads its backend PID and writes it into the tenant's cgroup.
 5. The backend executes the report query on the returned connection.
 6. If the query's CPU/memory usage exceeds the tenant's cgroup limits, the kernel throttles the underlying PostgreSQL backend process directly — the query simply takes longer to complete; no application-level intervention occurs.
-7. The Governor's background monitor detects the throttling (via `cpu.stat`) on its next poll and logs the event, with tenant ID and timestamp, to the metadata database.
+7. The backend's monitor thread calls `get_tenant_usage()` on its next 2-second cycle, sees the throttling in `cpu.stat`, and stores a usage sample and a throttle event in the metadata database.
 8. The admin dashboard, polling the usage endpoint, reflects the updated CPU/memory usage and the new throttle event on its next refresh — typically within a couple of seconds.
 
 Meanwhile, other tenants' connections live in their own separate cgroups and are entirely unaffected by tenant's heavy query — this is the core property the live demo is built to make visible.
@@ -104,7 +106,10 @@ Meanwhile, other tenants' connections live in their own separate cgroups and are
 | Decision | Reasoning |
 |---|---|
 | PostgreSQL only, no MySQL | MySQL's default threaded connection model doesn't expose a clean per-connection OS process to attach cgroup controls to. |
-| Session pooling, not transaction pooling | Transaction pooling can reassign a connection's underlying process across different tenants mid-session, which would break the PID-to-cgroup mapping this project depends on. |
+| Per-tenant pools, not shared transaction pooling | A connection is only ever used by one tenant, so every backend PID belongs to exactly one tenant's cgroup. Transaction pooling across tenants would break that mapping. |
+| `memory.high`, not `memory.max` | Slowing a tenant down is safe; an OOM kill of one backend makes Postgres restart every connection. |
+| Parallel workers off for tenant queries | Workers are separate processes outside the tenant's cgroup and would let a heavy query escape its limit. |
+| Separate system connection for admin and login | Keeps the operator's own queries out of tenant cgroups. |
 | Governor embedded in the backend, not a standalone wire-protocol proxy | Building a protocol-level Postgres proxy is significant additional systems work; embedding the Governor as an internal module lets the team focus development time on the core isolation mechanism within the project timeline. A standalone proxy is documented as future work. |
 | Polling instead of WebSockets for the admin dashboard | The usage data changes on the order of seconds, not milliseconds; polling every 1–2 seconds is simple to implement correctly and sufficient for the demo's purposes. |
 | Cgroups v2 (not v1) | v2's unified hierarchy is the current standard interface on modern Linux kernels and is simpler to reason about than v1's per-controller trees. |
