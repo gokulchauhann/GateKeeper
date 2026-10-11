@@ -44,21 +44,21 @@ class TenantGovernor:
             return self._pools[tenant_id]
 
     def get_connection(self, tenant_id):
-    try:
-        tenant_id = str(int(tenant_id))   # rejects things like "../x"
-        tenant_pool = self._get_pool(tenant_id)
-        conn = tenant_pool.getconn()
-    except Exception as e:
-        raise GovernorConnectionError(f"no connection for tenant {tenant_id}") from e
-    try:
-        assign_pid(create_cgroup(tenant_id, 20), conn.info.backend_pid)
-    except Exception as e:
-        tenant_pool.putconn(conn, close=True)
-        raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
-    return conn
+        try:
+            tenant_id = str(int(tenant_id))   # rejects things like "../x"
+            tenant_pool = self._get_pool(tenant_id)
+            conn = tenant_pool.getconn()
+        except Exception as e:
+            raise GovernorConnectionError(f"no connection for tenant {tenant_id}") from e
+        try:
+            assign_pid(create_cgroup(tenant_id, 20), conn.info.backend_pid)
+        except Exception as e:
+            tenant_pool.putconn(conn, close=True)
+            raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
+        return conn
 
     def release_connection(self, tenant_id, conn):
-    self._pools[str(int(tenant_id))].putconn(conn)
+        self._pools[str(int(tenant_id))].putconn(conn)
 
 
 def cgroup_of(pid: int) -> str:
