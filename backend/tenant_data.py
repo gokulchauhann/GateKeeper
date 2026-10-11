@@ -10,6 +10,7 @@ GOVERNOR=stub (default) works on any machine: plain connections, no cgroups.
 GOVERNOR=real needs Linux with cgroups v2 and root (sudo).
 """
 import os
+import time
 from contextlib import contextmanager
 
 from fastapi import HTTPException
@@ -41,20 +42,16 @@ def tenant_cursor(tenant_id: int):
         raise HTTPException(status_code=503, detail=f"Database unavailable for this tenant: {e}")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Parallel query workers are separate Postgres processes started by the
+            # server, so they would NOT be in the tenant's cgroup. Turning them off
+            # keeps all of this tenant's work inside the one confined backend.
+            cur.execute("SET LOCAL max_parallel_workers_per_gather = 0")
             yield cur
     finally:
         # These queries only read, so roll back: a pooled connection must not
         # sit "idle in transaction" while it waits for the next request.
         conn.rollback()
         governor.release_connection(str(tenant_id), conn)
-
-
-def tenant_usage(tenant_id: int):
-    """Latest usage sample, or None. The real Governor has no
-    get_tenant_usage() yet (Rohit's task), so this returns None until then."""
-    if hasattr(governor, "get_tenant_usage"):
-        return governor.get_tenant_usage(str(tenant_id))
-    return None
 
 
 def _order_rows(rows):
@@ -104,3 +101,47 @@ def orders_page(tenant_id: int, limit: int = 50) -> dict:
         s = cur.fetchone()
     return {"orders": rows,
             "summary": {"count": s["count"], "revenue": float(s["revenue"]), "open": s["open"]}}
+
+
+# The deliberately heavy report. Besides monthly orders and revenue it counts,
+# for every order, how many earlier orders the same customer had placed
+# ("repeat orders"). That is a self-join of the tenant's orders on customer:
+# with about 200 orders per customer it compares millions of pairs, so it is
+# CPU-bound and runs for seconds. That is the point: it is the noisy neighbour.
+_REPORT_SQL = """
+WITH earlier AS (
+    SELECT o1.id, count(*) AS earlier_orders
+    FROM orders o1
+    JOIN orders o2
+      ON o2.tenant_id = o1.tenant_id
+     AND o2.customer_id = o1.customer_id
+     AND o2.created_at < o1.created_at
+    WHERE o1.tenant_id = %(t)s AND o2.tenant_id = %(t)s
+    GROUP BY o1.id
+)
+SELECT to_char(date_trunc('month', o.created_at), 'YYYY-MM') AS month,
+       count(*) AS orders,
+       sum(o.amount) AS revenue,
+       count(e.id) AS repeat_orders
+FROM orders o
+LEFT JOIN earlier e ON e.id = o.id
+WHERE o.tenant_id = %(t)s
+GROUP BY 1
+ORDER BY 1
+"""
+
+
+def heavy_report(tenant_id: int) -> dict:
+    started = time.perf_counter()
+    with tenant_cursor(tenant_id) as cur:
+        cur.execute(_REPORT_SQL, {"t": tenant_id})
+        rows = cur.fetchall()
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    return {
+        "status": "completed",
+        "duration_ms": duration_ms,
+        "rows": [{"month": r["month"], "orders": r["orders"], "revenue": float(r["revenue"]),
+                  "repeat_orders": r["repeat_orders"]} for r in rows],
+        "governor_mode": GOVERNOR_MODE,
+        "cgroup_enforced": GOVERNOR_MODE == "enforced",
+    }
