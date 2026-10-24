@@ -2,6 +2,13 @@
 {% from "macros/layout.html" import icon %}
 {% import "macros/ui.html" as ui with context %}
 
+{# Optional context for Phase III endpoints the backend does not provide yet
+   (see frontend/README.md). Missing means the matching feature shows a notice. #}
+{% set history_url = usage_history_url | default(none) %}
+{% set throttle_url = throttle_events_url | default(none) %}
+{% set plan_url = plan_change_url | default(none) %}
+{% set plan_options = plans | default(none) %}
+
 {% block title %}Admin console{% endblock %}
 
 {% block styles %}
@@ -20,6 +27,8 @@
             {% if governor_mode == "enforced" %}{{ ui.badge("Governor enforcing", "success") }}{% else %}{{ ui.badge("Governor: stub mode", "warning") }}{% endif %}
             <span class="meta">Updated <time id="usage-updated" datetime="{{ updated_at or '' }}" data-local-time>{{ updated_at or "never" }}</time></span>
         </div>
+        <span class="live-pill live-pill--loading" id="live-status" role="status" aria-live="polite">Connecting…</span>
+        <button type="button" class="btn btn--secondary" id="live-toggle" aria-pressed="false">{{ icon("pause") }}<span>Pause</span></button>
         <button type="button" class="btn btn--secondary" id="usage-refresh">{{ icon("refresh") }}<span>Refresh</span></button>
     </div>
 </header>
@@ -28,20 +37,21 @@
 
 <section class="stat-grid" aria-label="Tenant overview">
     {{ ui.stat("Total tenants", summary.total) }}
-    {{ ui.stat("Active tenants", summary.active, hint="With an open database session", field="active") }}
+    {{ ui.stat("Active tenants", summary.active, hint="With a recent usage sample", field="active") }}
     {{ ui.stat("Throttled tenants", summary.throttled, hint="Throttled in the latest sample", tone="danger" if summary.throttled, field="throttled") }}
-    {{ ui.stat("Average CPU", ("%.1f%%" | format(summary.avg_cpu)) if summary.avg_cpu is not none else "—", hint="Across active tenants", field="avg-cpu") }}
+    {{ ui.stat("Average CPU", ("%.1f%%" | format(summary.avg_cpu)) if summary.avg_cpu is not none else "—", hint="Of one core, across active tenants", field="avg-cpu") }}
 </section>
 
 <section class="card card--flush" aria-labelledby="tenants-title">
     <div class="card__header">
         <div>
             <h2 id="tenants-title" class="card__title">Tenants</h2>
-            <p class="card__subtitle">CPU and memory are shown against each plan's quota.</p>
+            <p class="card__subtitle">CPU is a share of one core, against the plan's <code>cpu.max</code> quota. Memory is <code>memory.current</code> against the plan's <code>memory.high</code> soft limit.</p>
         </div>
     </div>
     <div class="table-wrap">
-        <table class="table" id="tenant-table" data-usage-url="{{ usage_url }}" data-warn-ratio="{{ warn_ratio }}">
+        <table class="table" id="tenant-table" data-usage-url="{{ usage_url }}" data-warn-ratio="{{ warn_ratio }}"
+               data-governor-mode="{{ governor_mode }}"{% if history_url %} data-history-url="{{ history_url }}"{% endif %}{% if throttle_url %} data-throttle-url="{{ throttle_url }}"{% endif %}>
             <caption class="sr-only">Tenant resource usage</caption>
             <thead>
                 <tr>
@@ -56,6 +66,8 @@
             <tbody>
                 {% for row in rows %}
                 <tr data-tenant-id="{{ row.tenant.id }}"
+                    data-tenant-name="{{ row.tenant.name }}"
+                    data-plan="{{ row.tenant.plan }}"
                     data-cpu-quota="{{ row.tenant.cpu_quota_percent }}"
                     data-memory-limit="{{ row.tenant.memory_limit_mb }}">
                     <td>
@@ -65,7 +77,7 @@
                         </div>
                     </td>
                     <td>
-                        <div class="tenant-cell">
+                        <div class="tenant-cell" data-field="plan">
                             {{ ui.plan_badge(row.tenant.plan) }}
                             <span class="tenant-cell__id">{{ row.tenant.cpu_quota_percent }}% CPU · {{ row.tenant.memory_limit_mb }} MB</span>
                         </div>
@@ -83,56 +95,145 @@
     </div>
 </section>
 
+<section class="card" aria-labelledby="live-title">
+    <div class="card__header">
+        <div>
+            <h2 id="live-title" class="card__title">Live usage</h2>
+            <p class="card__subtitle">
+                Samples from <code>{{ usage_url }}</code>, polled every 2 seconds{% if not history_url %} since this page opened (the backend has no history endpoint yet){% endif %}.
+                {% if governor_mode == "enforced" %}Values are read from each tenant's cgroup by the usage monitor.{% else %}Stub mode: these values are simulated by the StubGovernor, not measured.{% endif %}
+            </p>
+        </div>
+        {% if governor_mode == "enforced" %}{{ ui.badge("Measured", "success") }}{% else %}{{ ui.badge("Simulated", "warning") }}{% endif %}
+    </div>
+    <p class="chart-notice" id="chart-notice" role="status">Waiting for the first sample…</p>
+    <div class="chart-grid" id="chart-grid">
+        <figure class="chart">
+            <figcaption class="chart__title">CPU, % of one core <span class="chart__hint">dashed line: plan quota</span></figcaption>
+            <div class="chart__box">
+                <canvas id="cpu-chart" role="img" aria-label="Line chart of CPU usage per tenant over time, as a percentage of one core"></canvas>
+            </div>
+        </figure>
+        <figure class="chart">
+            <figcaption class="chart__title">Memory, MB <span class="chart__hint">limit shown in the legend</span></figcaption>
+            <div class="chart__box">
+                <canvas id="memory-chart" role="img" aria-label="Line chart of memory usage per tenant over time, in megabytes"></canvas>
+            </div>
+        </figure>
+    </div>
+</section>
+
 <div class="grid-2">
-    <section class="card" aria-labelledby="protection-title">
+    <section class="card card--flush" aria-labelledby="throttle-title">
         <div class="card__header">
             <div>
-                <h2 id="protection-title" class="card__title">Resource protection</h2>
+                <h2 id="throttle-title" class="card__title">Throttle events</h2>
                 <p class="card__subtitle">
-                    {% if governor_mode == "enforced" %}
-                        The Governor is assigning tenant sessions to their cgroups.
-                    {% else %}
-                        How GateKeeper isolates tenants. In stub mode none of these controls are active yet.
-                    {% endif %}
+                    {% if throttle_url %}Recorded throttle events from the backend, newest first.{% else %}Throttling seen in the polled samples since this page opened, newest first. Older recorded events need a throttle-events endpoint (not built yet).{% endif %}
+                    Each value is CPU time the kernel withheld during one sampling interval.
+                    {% if governor_mode != "enforced" %}<strong class="text-warning">Stub mode: these events are simulated, not measured.</strong>{% endif %}
                 </p>
             </div>
+            <span class="badge badge--neutral" id="throttle-count" title="Events shown">0</span>
         </div>
-        <div class="feature-grid">
-            <div class="feature">
-                <div class="feature__head">{{ icon("cpu") }}<span>CPU control</span></div>
-                <p>Each plan's CPU quota is written to the tenant cgroup's <code>cpu.max</code>, so the kernel scheduler caps it.</p>
-            </div>
-            <div class="feature">
-                <div class="feature__head">{{ icon("memory") }}<span>Memory usage</span></div>
-                <p>Read from <code>memory.current</code> and capped by <code>memory.max</code> for the tenant's plan.</p>
-            </div>
-            <div class="feature">
-                <div class="feature__head">{{ icon("activity") }}<span>Throttling</span></div>
-                <p>Detected from <code>cpu.stat</code> when the kernel holds back a tenant that reached its quota.</p>
-            </div>
-            <div class="feature">
-                <div class="feature__head">{{ icon("layers") }}<span>Tenant isolation</span></div>
-                <p>Session pooling keeps each tenant on its own PostgreSQL backend process inside its own cgroup.</p>
-            </div>
+        <div class="table-wrap table-wrap--log">
+            <table class="table table--log" id="throttle-log">
+                <caption class="sr-only">Throttle events</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Time</th>
+                        <th scope="col">Tenant</th>
+                        <th scope="col" class="num">Throttled</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div id="throttle-empty">
+            {{ ui.empty_state("No throttling recorded", "Events appear here when a tenant reaches its CPU quota and the kernel holds it back.", "activity") }}
         </div>
     </section>
 
-    <section class="card" aria-labelledby="live-title">
+    <section class="card" aria-labelledby="plan-title">
         <div class="card__header">
             <div>
-                <h2 id="live-title" class="card__title">Live usage and throttle log</h2>
-                <p class="card__subtitle">Planned for Phase III.</p>
+                <h2 id="plan-title" class="card__title">Plan tiers</h2>
+                <p class="card__subtitle">Change a tenant's plan. The new CPU and memory limits must be re-applied to the tenant's cgroup by the backend.</p>
             </div>
-            {{ ui.badge("Phase III", "neutral") }}
         </div>
-        <div class="placeholder-panel" id="live-usage">
-            {{ ui.empty_state("Not connected yet", "A live CPU and memory chart and a timestamped throttle-event log will poll the usage endpoint every 1–2 seconds.", "chart") }}
+        {% if plan_url and plan_options %}
+        <form class="form plan-form" id="plan-form" data-url-template="{{ plan_url }}" novalidate>
+            <div class="field">
+                <label for="plan-tenant">Tenant</label>
+                <select id="plan-tenant" name="tenant" required>
+                    <option value="">Choose a tenant</option>
+                    {% for row in rows %}
+                    <option value="{{ row.tenant.id }}">{{ row.tenant.name }} ({{ row.tenant.plan | title }})</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="field">
+                <label for="plan-name">New plan</label>
+                <select id="plan-name" name="plan" required>
+                    <option value="">Choose a plan</option>
+                    {% for plan in plan_options %}
+                    <option value="{{ plan.name }}" data-cpu-quota="{{ plan.cpu_quota_percent }}" data-memory-limit="{{ plan.memory_limit_mb }}">{{ plan.name | title }}: {{ plan.cpu_quota_percent }}% CPU, {{ plan.memory_limit_mb }} MB</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <p class="field-error" id="plan-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn--primary" id="plan-submit"><span>Change plan</span></button>
+            <div class="plan-result" id="plan-result" role="status" aria-live="polite" hidden></div>
+        </form>
+        {% else %}
+        <div class="notice">
+            <p class="notice__title">{{ icon("lock") }}<span>Not available yet</span></p>
+            <p>This backend has no plan-change endpoint, and the Governor cannot re-apply new limits to a running tenant's cgroup (it reads them once per tenant). Plan changes currently need a database update and a server restart.</p>
+            <p>Needed: <code>POST /admin/tenants/{id}/plan</code> in the backend and a Governor method that rewrites <code>cpu.max</code> and <code>memory.high</code>.</p>
         </div>
+        {% endif %}
     </section>
 </div>
+
+<section class="card" aria-labelledby="protection-title">
+    <div class="card__header">
+        <div>
+            <h2 id="protection-title" class="card__title">Resource protection</h2>
+            <p class="card__subtitle">
+                {% if governor_mode == "enforced" %}
+                    The Governor is assigning tenant sessions to their cgroups.
+                {% else %}
+                    How GateKeeper isolates tenants. In stub mode none of these controls are active.
+                {% endif %}
+            </p>
+        </div>
+    </div>
+    <div class="feature-grid">
+        <div class="feature">
+            <div class="feature__head">{{ icon("cpu") }}<span>CPU control</span></div>
+            <p>Each plan's CPU quota is written to the tenant cgroup's <code>cpu.max</code>, so the kernel scheduler caps it.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">{{ icon("memory") }}<span>Memory usage</span></div>
+            <p>Read from <code>memory.current</code>. The plan's limit is applied as <code>memory.high</code>: the kernel slows the tenant down instead of killing a backend.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">{{ icon("activity") }}<span>Throttling</span></div>
+            <p>Computed from the change in <code>throttled_usec</code> in <code>cpu.stat</code> between two samples.</p>
+        </div>
+        <div class="feature">
+            <div class="feature__head">{{ icon("layers") }}<span>Tenant isolation</span></div>
+            <p>Each tenant has its own connection pool, and every backend PID it uses is moved into that tenant's cgroup.</p>
+        </div>
+    </div>
+</section>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
 <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
 <script src="{{ url_for('static', path='js/admin.js') }}" defer></script>
+{% if plan_url and plan_options %}
+<script src="{{ url_for('static', path='js/admin-plan.js') }}" defer></script>
+{% endif %}
 {% endblock %}
