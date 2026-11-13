@@ -1,7 +1,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/postgresql-14+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Status](https://img.shields.io/badge/status-phase%202-yellow.svg)
+![Status](https://img.shields.io/badge/status-phase%203-yellow.svg)
 
 # Gatekeeper
 
@@ -151,7 +151,7 @@ It prints each connection's PID and cgroup, each tenant's `cpu.max` and `memory.
 
 ## Project Status
 
-Currently in **Phase 2: Core Development**.
+Currently in **Phase 3: Evaluation and Completion**.
 
 - [x] Problem definition and architecture design
 - [x] Manual cgroup + PID validation, done twice on real PostgreSQL backends ([`docs/cgroups-notes.md`](docs/cgroups-notes.md), [`docs/cgroup-validation.md`](docs/cgroup-validation.md))
@@ -161,8 +161,10 @@ Currently in **Phase 2: Core Development**.
 - [x] Backend: bcrypt login and sessions, tenant pages, heavy report, admin page, `/admin/usage` (tested in stub mode)
 - [x] Governor: per-tenant pools, plan-tier limits, `memory.high`, PID assignment, `get_tenant_usage()`
 - [x] End-to-end run in real mode: the heavy report took 4,224 ms without a limit and 17,365 ms under a 20% cgroup; the admin page showed 20.0% / 20% CPU while it ran ([`docs/phase2-results.md`](docs/phase2-results.md))
+- [x] Live admin dashboard: CPU and memory charts with plan quota lines, throttle-event log, plan-change form (Phase 3, frontend)
+- [x] Real-mode validation on Linux: `scripts/validate_real_mode.py` 18/18 checks; 5 runs per mode, Acme held at 20.0% of a core in every run, Umbrella (100%) never throttled ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md))
 - [ ] Noisy-neighbour comparison: another tenant's response time with enforcement on and off (Phase 3)
-- [ ] Live admin chart and throttle-event log (Phase 3)
+- [ ] Usage-history and throttle-event endpoints, so the admin charts show data from before the page opened (Phase 3)
 - [ ] Plan-tier changes from the admin page without a restart (Phase 3)
 - [ ] Noisy-neighbour demo with and without enforcement, testing and rehearsal (Phase 3)
 
@@ -191,7 +193,7 @@ Currently in **Phase 2: Core Development**.
 |---|---|
 | Gokul Singh | Team lead. Schema and demo data, interface contract, backend, Governor Phase 2 extensions, manual cgroup validation, documentation |
 | Rohit Singh | Governor core (cgroup creation, PID assignment, `TenantGovernor` with per-tenant pools), independent cgroup validation |
-| Yuvraj Singh | Frontend: login, tenant and admin pages, development server |
+| Yuvraj Singh | Frontend: login, tenant and admin pages, live admin dashboard, development server. Real-mode validation and measurement scripts, Phase 3 real-mode results |
 | Kanak Bhatia | Member |
 
 ## References

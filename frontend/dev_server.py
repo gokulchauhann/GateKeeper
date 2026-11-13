@@ -264,6 +264,8 @@ def admin_dashboard(request: Request):
         summary=summary,
         updated_at=max((row["usage"]["timestamp"] for row in active), default=None),
         usage_url="/admin/usage",
+        plan_change_url="/admin/tenants/{tenant_id}/plan",
+        plans=[{"name": name, **limits} for name, limits in dev_data.PLAN_TIERS.items()],
     )
 
 
@@ -274,3 +276,24 @@ def admin_usage(request: Request):
     if user is None or user["role"] != "admin":
         return JSONResponse({"detail": "Admin access required."}, status_code=403)
     return [usage for usage in map(tenant_usage, dev_data.TENANTS) if usage]
+
+
+@app.post("/admin/tenants/{tenant_id}/plan")
+async def change_plan(request: Request, tenant_id: int):
+    """Exercises the plan-change form with the proposed response shape
+    (frontend/README.md). There are no cgroups here, so limits_applied is
+    always false and the page must not claim the limits changed."""
+    user = current_user(request)
+    if user is None or user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required."}, status_code=403)
+    if tenant_id not in dev_data.TENANTS:
+        return JSONResponse({"detail": f"Unknown tenant {tenant_id}."}, status_code=404)
+    try:
+        plan = (await request.json()).get("plan")
+    except ValueError:
+        plan = None
+    if plan not in dev_data.PLAN_TIERS:
+        return JSONResponse({"detail": "Unknown plan."}, status_code=422)
+    dev_data.TENANTS[tenant_id]["plan"] = plan   # in memory only
+    return {"tenant_id": tenant_id, "plan": plan, **dev_data.PLAN_TIERS[plan],
+            "limits_applied": False, "cpu_max": None}

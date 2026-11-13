@@ -25,7 +25,9 @@
 
         if (!response.ok) {
             const detail = body && typeof body.detail === "string" ? body.detail : `Request failed (${response.status}).`;
-            throw new Error(detail);
+            const error = new Error(detail);
+            error.status = response.status;   // lets callers tell "signed out" (401/403) from other failures
+            throw error;
         }
         return body;
     }
