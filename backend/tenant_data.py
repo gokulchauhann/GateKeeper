@@ -16,6 +16,7 @@ import os
 import time
 from contextlib import contextmanager
 
+import psycopg2
 from fastapi import HTTPException
 from psycopg2.extras import RealDictCursor
 
@@ -54,11 +55,18 @@ def tenant_cursor(tenant_id: int):
             # keeps all of this tenant's work inside the one confined backend.
             cur.execute("SET LOCAL max_parallel_workers_per_gather = 0")
             yield cur
+    except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+        # The connection broke during the request (for example PostgreSQL
+        # restarted). Answer 503; the next request gets a fresh connection.
+        raise HTTPException(status_code=503, detail="Lost the database connection. Please try again.") from e
     finally:
         # These queries only read, so roll back: a pooled connection must not
         # sit "idle in transaction" while it waits for the next request.
-        conn.rollback()
-        governor.release_connection(str(tenant_id), conn)
+        try:
+            conn.rollback()
+            governor.release_connection(str(tenant_id), conn)
+        except psycopg2.Error:
+            governor.discard_connection(str(tenant_id), conn)
 
 
 def _order_rows(rows):

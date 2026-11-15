@@ -87,9 +87,14 @@ Measured with `scripts/noisy_neighbour.py` in a GitHub Codespace with 2 CPU core
 - **The p95 of the quiet phase in the "on" run (98.9 ms) was raised by an outlier**, so that run's p95 ratio (0.76×) does not mean the page got faster under load. The under-load values of the two runs are the fair comparison.
 - **Single run per mode** on a shared cloud machine. Repeating each mode would show how much the numbers vary.
 
+## 6. Plan change while a report runs
+
+In real mode, while Acme's heavy report was running at about 20% of a core, the admin changed Acme from Basic to Pro on the admin page. The page confirmed `cpu.max = 50000 100000`, read back from the cgroup, and within a few seconds Acme's line on the CPU chart rose to about 50%, without a restart or a new connection. The new value applies from the kernel's next scheduling period to the processes already in the cgroup. (Observed on the chart; exact samples were not saved.)
+
+The same run also confirmed the usage-history and throttle-event endpoints: after reloading the admin page, the charts and the throttle log showed the report from before the reload, with times matching the local clock.
+
 ## Not yet tested
 
 - **Repeated noisy-neighbour runs** (section 5 is one run per mode).
 - **The plain-loop test on bare-metal Linux**, to confirm the 4.6 times factor in section 3 comes from the VM.
 - **Memory limit behaviour** (`memory.high`) under a memory-heavy query.
-- **Plan-tier change without a restart.** Implemented (`POST /admin/tenants/{id}/plan` and `apply_limits()`), but its effect on a running report has not been recorded yet.

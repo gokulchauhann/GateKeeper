@@ -18,6 +18,7 @@ Gatekeeper tackles the "noisy neighbour" problem on a shared PostgreSQL database
 - [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
 - [Getting Started](#getting-started)
+- [Testing](#testing)
 - [Project Status](#project-status)
 - [Scope & Limitations](#scope--limitations)
 - [Future Work](#future-work)
@@ -45,6 +46,8 @@ PostgreSQL starts a dedicated operating system process for every client connecti
 Two details matter for correctness:
 - **Parallel query is turned off for tenant queries** (`SET LOCAL max_parallel_workers_per_gather = 0`). Parallel workers are separate Postgres processes outside the tenant's cgroup and would let a heavy query escape its limit.
 - **Admin and login queries use a separate plain connection**, so the operator's own queries never run inside a tenant's cgroup.
+- **Dead connections are replaced.** Every checkout checks the connection (`SELECT 1`), so after a PostgreSQL restart the next request gets a fresh connection, whose new PID goes into the cgroup as usual.
+- **Plans can change while tenants are running.** `apply_limits()` rewrites `cpu.max` and `memory.high` on the existing cgroup; the kernel applies it from the next 100 ms period.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full design and [`docs/interface-contract.md`](docs/interface-contract.md) for the exact interfaces.
 
@@ -93,6 +96,7 @@ Tenant Browser (Login)        Admin Browser (Login)
 |---|---|---|
 | `stub` (default) | Any machine with Python and PostgreSQL | Plain connections, no cgroups. Usage numbers are random, and every page shows a "not enforced" banner. For development. |
 | `real` | Linux, WSL2 or GitHub Codespaces with cgroups v2, run as **root** | Tenant connections go into their cgroups and limits are enforced by the kernel. |
+| `unlimited` | Same as `real` | Same Governor, pools and cgroups, but `cpu.max` and `memory.high` are set to `max`: tenants are measured, not limited. The baseline for on/off comparisons. |
 
 cgroups v2 does not exist on native Windows or macOS. Our Phase 2 real-mode run worked in a GitHub Codespace with `sudo`; other containers may not allow creating cgroups, so check with `sudo mkdir /sys/fs/cgroup/gk-test` (and `rmdir` it afterwards).
 
@@ -139,6 +143,12 @@ sudo ./venv/bin/uvicorn backend.main:app --port 8000
 
 Behind a proxy that serves the app over https (for example Codespaces port forwarding), add `--host 0.0.0.0 --forwarded-allow-ips "*"`.
 
+The admin charts use Chart.js from `frontend/static/vendor/chart.umd.min.js`, which is in the repository. To restore it if it is ever missing:
+```bash
+mkdir -p frontend/static/vendor
+curl -L -o frontend/static/vendor/chart.umd.min.js https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
+```
+
 Open http://127.0.0.1:8000/login. Demo accounts (local demo data only): `acme` / `acme-dev`, `globex` / `globex-dev`, `initech` / `initech-dev`, `umbrella` / `umbrella-dev`, and `admin` / `admin-dev`.
 
 **Governor self-test (real mode, after seeding):**
@@ -148,6 +158,25 @@ sudo ./venv/bin/python governor/governor.py
 It prints each connection's PID and cgroup, each tenant's `cpu.max` and `memory.high`, rejects an unknown tenant, and prints one usage sample.
 
 **Frontend only, without a database:** `uvicorn frontend.dev_server:app --reload --port 8000` (see [`frontend/README.md`](frontend/README.md)).
+
+## Testing
+
+**Unit tests** (no root, cgroups or database needed; a temporary folder stands in for `/sys/fs/cgroup`):
+```bash
+python -m unittest discover -s tests -v
+```
+They cover plan-tier limits, PID assignment on every checkout, rejection of unknown and malformed tenant IDs, pool reuse, live plan changes (`apply_limits`), the `unlimited` mode, the usage calculation from `cpu.stat`, and dead-connection replacement.
+
+**Real-mode scripts** (Linux, PostgreSQL seeded, backend running unless noted):
+
+| Script | What it checks |
+|---|---|
+| `sudo ./venv/bin/python scripts/validate_real_mode.py` | Every tenant's cgroup has the right `cpu.max`, `memory.high` and only PostgreSQL backend PIDs |
+| `./venv/bin/python scripts/measure_report.py acme umbrella` | Heavy-report time and CPU share per tenant, repeated runs |
+| `./venv/bin/python scripts/noisy_neighbour.py` | Another tenant's page time under heavy load; run once with `bash gatekeeper_real.sh off` and once with limits on |
+| `sudo ./venv/bin/python scripts/memory_test.py` | A tenant above its `memory.high` is slowed, not killed, and PostgreSQL does not restart (no web server needed) |
+
+The demo itself is written up in [`docs/demo-script.md`](docs/demo-script.md).
 
 ## Project Status
 
@@ -163,10 +192,15 @@ Currently in **Phase 3: Evaluation and Completion**.
 - [x] End-to-end run in real mode: the heavy report took 4,224 ms without a limit and 17,365 ms under a 20% cgroup; the admin page showed 20.0% / 20% CPU while it ran ([`docs/phase2-results.md`](docs/phase2-results.md))
 - [x] Live admin dashboard: CPU and memory charts with plan quota lines, throttle-event log, plan-change form (Phase 3, frontend)
 - [x] Real-mode validation on Linux: `scripts/validate_real_mode.py` 18/18 checks; 5 runs per mode, Acme held at 20.0% of a core in every run, Umbrella (100%) never throttled ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md))
-- [ ] Noisy-neighbour comparison: another tenant's response time with enforcement on and off (Phase 3)
-- [ ] Usage-history and throttle-event endpoints, so the admin charts show data from before the page opened (Phase 3)
-- [ ] Plan-tier changes from the admin page without a restart (Phase 3)
-- [ ] Noisy-neighbour demo with and without enforcement, testing and rehearsal (Phase 3)
+- [x] Usage-history and throttle-event endpoints: the admin charts and throttle log show stored data from before the page opened (Phase 3)
+- [x] Plan-tier changes from the admin page without a restart: `apply_limits()` rewrites `cpu.max` and `memory.high` on the running cgroup; a running report sped up from 20% to about 50% of a core after a Basic-to-Pro change (Phase 3)
+- [x] Enforcement-off mode (`GOVERNOR=unlimited`): same Governor and cgroups, limits set to `max`, for fair on/off comparisons (Phase 3)
+- [x] Noisy-neighbour comparison: under the same load, the other tenant's median page time was 45.9 ms with limits on against 87.5 ms with limits off (1.28× vs. 2.35× its quiet time) ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md), section 5)
+- [x] Dead-connection handling: health check on checkout, broken connections closed, 503 instead of a crash (Phase 3)
+- [x] Unit tests: 15 tests for the Governor and the measurement helpers (`tests/`)
+- [x] Demo script ([`docs/demo-script.md`](docs/demo-script.md)); Chart.js served from the repository, so the demo works offline
+- [ ] `memory.high` test run (`scripts/memory_test.py`) and repeated noisy-neighbour runs
+- [ ] Demo rehearsal
 
 ## Scope & Limitations
 
@@ -175,7 +209,7 @@ Currently in **Phase 3: Evaluation and Completion**.
 - **Single-machine demo** with simulated tenants, not a production deployment.
 - **Per-tenant pools are required.** Isolation depends on a connection never being shared between tenants; cross-tenant transaction pooling (as in PgBouncer's transaction mode) would break the PID-to-tenant mapping.
 - **`cpu.max` is a ceiling, not a reservation.** It stops one tenant taking too much, but does not add capacity. Proportional sharing with `cpu.weight` is future work.
-- **Limits are read once per tenant.** A plan change takes effect after a restart until the Phase 3 "re-apply limits" step is built.
+- **Cgroups limit CPU time per tenant, not every shared resource.** Tenants still share PostgreSQL's buffer cache, its background processes and disk I/O, so a small slowdown remains under load even with limits on (1.28× in our test).
 - **Real mode runs the backend as root**, because of the cgroup writes. Moving those writes into a small privileged helper or a delegated cgroup subtree is future work.
 
 ## Future Work

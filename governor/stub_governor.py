@@ -33,6 +33,10 @@ class StubGovernor:
         except Exception:
             pass
 
+    def discard_connection(self, tenant_id: str, conn):
+        """Same as release in the stub: the connection is closed either way."""
+        self.release_connection(tenant_id, conn)
+
     def get_tenant_usage(self, tenant_id: str) -> dict:
         """Returns fake-but-plausible usage data, shaped exactly like the
         real Governor's output, so the admin dashboard can be built and

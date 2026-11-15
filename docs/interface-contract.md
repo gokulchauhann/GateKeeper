@@ -99,4 +99,27 @@ Returns JSON, sourced from the `usage_events` and `throttle_events` tables:
 
 **Choosing the Governor:** set `GOVERNOR=real` or `GOVERNOR=stub` in `.env` (default `stub`), so the backend can be built and tested on any laptop and switched to the real Governor on a WSL/Linux machine running as root.
 
-**Phase 3 (not needed now):** `GET /admin/usage/history` for the chart, and `POST /admin/tenants/{id}/plan` for plan changes. Shapes to be added here before they are built.
+---
+
+## Phase 3 additions
+
+**Governor modes** (`GOVERNOR=` in `.env`): `stub` (no cgroups, simulated usage), `real` (limits enforced), `unlimited` (the real Governor and cgroups with `cpu.max` and `memory.high` set to `max`: measured but not limited, the baseline for on/off comparisons). Templates receive `governor_mode` as `"stub"`, `"enforced"` or `"unlimited"`.
+
+**Governor methods:**
+- `apply_limits(tenant_id) -> {"cpu_max", "memory_high"}`: re-reads the tenant's plan and rewrites `cpu.max` and `memory.high` on its cgroup (creating it if needed). Processes already in the cgroup get the new limit from the kernel's next scheduling period, so no restart or reconnect is needed. The returned values are read back from the cgroup files. Raises `GovernorConnectionError` for an unknown tenant.
+- `discard_connection(tenant_id, conn)`: closes a connection that broke during a request instead of returning it to the pool.
+- Every checkout runs a health check (`conn.closed`, then `SELECT 1`); dead connections are closed and replaced, and the replacement's PID is written into the cgroup as usual. `release_connection` closes a connection that is already closed instead of pooling it.
+
+**Endpoints** (admin only; 403 otherwise):
+
+| Route | Returns |
+|---|---|
+| `GET /admin/usage/history?minutes=5` | Usage samples from the last 1 to 60 minutes, oldest first, same shape as `/admin/usage`. Empty in stub mode. |
+| `GET /admin/throttle-events?limit=100` | `[{"tenant_id", "throttled_ms", "occurred_at"}]`, newest first, 1 to 500 rows. `occurred_at` equals the matching usage sample's `timestamp`. Empty in stub mode. |
+| `POST /admin/tenants/{tenant_id}/plan`, body `{"plan": "pro"}` | `{"tenant_id", "plan", "cpu_quota_percent", "memory_limit_mb", "limits_applied": bool, "cpu_max"}`. 400 for an unknown plan, 404 for an unknown tenant. `limits_applied` is true only if the cgroup was rewritten; `cpu_max` is read back from it. |
+
+Timestamps are sent with the database's time zone attached, so they are correct on servers not set to UTC.
+
+The admin page receives `usage_history_url` and `throttle_events_url` only in the measured modes (`real`, `unlimited`), and `plan_change_url` with `plans` in every mode.
+
+**Errors:** a database connection lost during a tenant request answers HTTP 503 ("Lost the database connection. Please try again."); the next request gets a fresh connection.

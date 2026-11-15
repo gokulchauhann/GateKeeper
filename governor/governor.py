@@ -12,6 +12,8 @@ Built on Rohit's TenantGovernor. Phase 2 additions (docs/interface-contract.md):
 Phase 3: apply_limits() rewrites a tenant's limits after a plan change, without a restart.
 TenantGovernor(enforce=False) does everything the same but writes "max" (no limit),
 for a fair enforcement-off baseline that is still measured through cpu.stat.
+Every checkout checks the connection (closed flag, then SELECT 1) and replaces a
+dead one, for example after PostgreSQL restarted.
 
 Needs Linux with cgroups v2 and root (sudo).
 """
@@ -74,6 +76,22 @@ def tenant_limits(tenant_id: str):
         conn.close()
 
 
+def connection_alive(conn) -> bool:
+    """Cheap health check for a pooled connection. conn.closed is free but only
+    knows about closes on our side; after a PostgreSQL restart it still says
+    open, so a one-row SELECT confirms the server end (well under 1 ms locally)."""
+    if conn.closed:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.rollback()   # leave the connection idle, not "idle in transaction"
+        return True
+    except Exception:
+        return False
+
+
 def _read_cpu_stat(path: str) -> dict:
     """cpu.stat is lines of 'key value'; returns them as {key: int}."""
     stats = {}
@@ -122,7 +140,7 @@ class TenantGovernor:
             tenant_id = str(int(tenant_id))   # rejects things like "../x"
             path = self._ensure_cgroup(tenant_id)
             tenant_pool = self._get_pool(tenant_id)
-            conn = tenant_pool.getconn()
+            conn = self._checkout_alive(tenant_pool)
         except GovernorConnectionError:
             raise
         except Exception as e:
@@ -134,6 +152,17 @@ class TenantGovernor:
             tenant_pool.putconn(conn, close=True)
             raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
         return conn
+
+    def _checkout_alive(self, tenant_pool):
+        """A connection that passed the health check. Dead ones are closed and
+        dropped from the pool; after a database restart every pooled connection
+        can be dead, so try up to the pool size plus one fresh connection."""
+        for _ in range(self._maxconn + 1):
+            conn = tenant_pool.getconn()
+            if connection_alive(conn):
+                return conn
+            tenant_pool.putconn(conn, close=True)
+        raise GovernorConnectionError("database unreachable: no live connection")
 
     def apply_limits(self, tenant_id) -> dict:
         """Re-read the tenant's plan and rewrite cpu.max and memory.high on its
@@ -158,7 +187,12 @@ class TenantGovernor:
         return {"cpu_max": cpu_max, "memory_high": memory_high}
 
     def release_connection(self, tenant_id, conn):
-        self._pools[str(int(tenant_id))].putconn(conn)
+        # A connection that died during the request is closed instead of reused.
+        self._pools[str(int(tenant_id))].putconn(conn, close=bool(conn.closed))
+
+    def discard_connection(self, tenant_id, conn):
+        """Close a connection that failed during a request, instead of returning it."""
+        self._pools[str(int(tenant_id))].putconn(conn, close=True)
 
     def get_tenant_usage(self, tenant_id):
         """Usage since the previous call, in the interface-contract shape.

@@ -232,7 +232,8 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+{# Chart.js 4.4.1 (MIT licence) is stored in the repository, so the demo works without internet. #}
+<script src="{{ url_for('static', path='vendor/chart.umd.min.js') }}" defer></script>
 <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
 <script src="{{ url_for('static', path='js/admin.js') }}" defer></script>
 {% if plan_url and plan_options %}
