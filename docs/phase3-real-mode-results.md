@@ -1,6 +1,6 @@
 # Phase 3 Real-Mode Results
 
-Repeated measurements of the heavy report with and without cgroup enforcement, the full real-mode validation, and the noisy-neighbour test (section 5). Sections 1 to 4 were read from the running system on 10 November 2026 (Ubuntu VM), section 5 on 15 November 2026 (GitHub Codespace). Phase 2's single-run results are in [`phase2-results.md`](phase2-results.md).
+Repeated measurements of the heavy report with and without cgroup enforcement, the full real-mode validation, and the noisy-neighbour test (section 5). Sections 1 to 4 were read from the running system on 10 November 2026 (Ubuntu VM), sections 5 to 7 on 15 November 2026 (GitHub Codespace). Phase 2's single-run results are in [`phase2-results.md`](phase2-results.md).
 
 ## Environment
 
@@ -93,8 +93,24 @@ In real mode, while Acme's heavy report was running at about 20% of a core, the 
 
 The same run also confirmed the usage-history and throttle-event endpoints: after reloading the admin page, the charts and the throttle log showed the report from before the reload, with times matching the local clock.
 
+## 7. Memory limit (`memory.high`)
+
+Measured with `scripts/memory_test.py` in the same Codespace (no swap). The script takes a connection through the real Governor, so the backend process is in the tenant's cgroup, then sorts 4,000,000 rows in memory in that session (`work_mem` raised to 2 GB for the session only, statement timeout 180 s).
+
+| | Acme (Basic, `memory.high` 256 MB) | Umbrella (Enterprise, `memory.high` 4096 MB) |
+|---|---|---|
+| Query | Cancelled by the 180 s statement timeout (180.7 s) | Completed in 10.8 s |
+| Peak `memory.current` | 269 MB | 544 MB |
+| `memory.events` "high" (times above `memory.high`) | +30,423 | 0 |
+| `memory.events` "oom_kill" | 0 | 0 |
+| Same backend process afterwards | yes | yes |
+| PostgreSQL restarted | no | no |
+
+- **The limit held.** The sort needs about 544 MB (Umbrella's peak). Acme's cgroup stayed at about 269 MB, close to its 256 MB `memory.high`, and the kernel recorded 30,423 times above the limit, each one followed by reclaim and a slowdown.
+- **The tenant was slowed, not killed.** Without swap, the kernel could not free enough memory, so Acme's query became too slow to finish within 180 s, while the same query took 10.8 s for Umbrella. There was no OOM kill, the backend process survived, and PostgreSQL did not restart.
+- **This is why we use `memory.high` and not `memory.max`.** A hard `memory.max` limit could have killed the backend, and PostgreSQL then restarts every connection, which would have hurt every tenant.
+
 ## Not yet tested
 
 - **Repeated noisy-neighbour runs** (section 5 is one run per mode).
 - **The plain-loop test on bare-metal Linux**, to confirm the 4.6 times factor in section 3 comes from the VM.
-- **Memory limit behaviour** (`memory.high`) under a memory-heavy query.

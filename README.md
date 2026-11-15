@@ -199,7 +199,8 @@ Currently in **Phase 3: Evaluation and Completion**.
 - [x] Dead-connection handling: health check on checkout, broken connections closed, 503 instead of a crash (Phase 3)
 - [x] Unit tests: 15 tests for the Governor and the measurement helpers (`tests/`)
 - [x] Demo script ([`docs/demo-script.md`](docs/demo-script.md)); Chart.js served from the repository, so the demo works offline
-- [ ] `memory.high` test run (`scripts/memory_test.py`) and repeated noisy-neighbour runs
+- [x] `memory.high` test: the same 4,000,000-row sort ran in 10.8 s for a 4 GB tenant, while a 256 MB tenant was held at about 269 MB and slowed past a 180 s timeout, with no OOM kill and no PostgreSQL restart ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md), section 7)
+- [ ] Repeated noisy-neighbour runs
 - [ ] Demo rehearsal
 
 ## Scope & Limitations
