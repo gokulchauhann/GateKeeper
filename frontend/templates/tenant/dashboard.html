@@ -36,6 +36,8 @@
                 <p class="card__subtitle">
                     {% if governor_mode == "enforced" %}
                         Protected by GateKeeper. CPU and memory limits are enforced by the kernel through this tenant's cgroup.
+                    {% elif governor_mode == "unlimited" %}
+                        Limits off (baseline run). Usage is measured in this tenant's cgroup, but no limit is applied.
                     {% else %}
                         Development stub. Values are simulated and no cgroup limits are applied.
                     {% endif %}
@@ -51,7 +53,7 @@
         </div>
         <dl class="kv">
             <div><dt>Session status</dt><dd>Active</dd></div>
-            <div><dt>Protection</dt><dd>{{ "Cgroup enforced" if governor_mode == "enforced" else "Stub mode, not enforced" }}</dd></div>
+            <div><dt>Protection</dt><dd>{{ "Cgroup enforced" if governor_mode == "enforced" else ("Measured, limits off" if governor_mode == "unlimited" else "Stub mode, not enforced") }}</dd></div>
             <div><dt>Throttled in last sample</dt><dd>{{ "{:,}".format(usage.throttled_ms) }} ms</dd></div>
             <div><dt>Last sample</dt><dd><time datetime="{{ usage.timestamp }}" data-local-time>{{ usage.timestamp }}</time></dd></div>
         </dl>

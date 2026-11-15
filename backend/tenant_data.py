@@ -8,6 +8,9 @@ only ever sees its own rows.
 
 GOVERNOR=stub (default) works on any machine: plain connections, no cgroups.
 GOVERNOR=real needs Linux with cgroups v2 and root (sudo).
+GOVERNOR=unlimited is the real Governor with every limit set to "max": tenants
+are still placed in cgroups and measured, but nothing is throttled. It is the
+enforcement-off baseline for comparisons (same pools, same code path).
 """
 import os
 import time
@@ -18,17 +21,21 @@ from psycopg2.extras import RealDictCursor
 
 from governor import stub_governor
 
-GOVERNOR_MODE = "enforced" if os.environ.get("GOVERNOR", "stub") == "real" else "stub"
+# governor_mode as the templates see it: "enforced", "unlimited" or "stub".
+GOVERNOR_MODE = {"real": "enforced", "unlimited": "unlimited"}.get(
+    os.environ.get("GOVERNOR", "stub"), "stub")
+# True when usage comes from real cgroups (and is stored), not from the stub.
+MEASURED = GOVERNOR_MODE in ("enforced", "unlimited")
 
-if GOVERNOR_MODE == "enforced":
+if MEASURED:
     from governor import governor as real_governor
-    governor = real_governor.TenantGovernor()
+    governor = real_governor.TenantGovernor(enforce=(GOVERNOR_MODE == "enforced"))
 else:
     governor = stub_governor.StubGovernor()
 
 # Each module defines its own error class, so catch whichever one is raised.
 _GOVERNOR_ERRORS = (stub_governor.GovernorConnectionError,)
-if GOVERNOR_MODE == "enforced":
+if MEASURED:
     _GOVERNOR_ERRORS += (real_governor.GovernorConnectionError,)
 
 

@@ -24,7 +24,7 @@
     </div>
     <div class="header-actions">
         <div class="system-status">
-            {% if governor_mode == "enforced" %}{{ ui.badge("Governor enforcing", "success") }}{% else %}{{ ui.badge("Governor: stub mode", "warning") }}{% endif %}
+            {% if governor_mode == "enforced" %}{{ ui.badge("Governor enforcing", "success") }}{% elif governor_mode == "unlimited" %}{{ ui.badge("Governor: limits off", "warning") }}{% else %}{{ ui.badge("Governor: stub mode", "warning") }}{% endif %}
             <span class="meta">Updated <time id="usage-updated" datetime="{{ updated_at or '' }}" data-local-time>{{ updated_at or "never" }}</time></span>
         </div>
         <span class="live-pill live-pill--loading" id="live-status" role="status" aria-live="polite">Connecting…</span>
@@ -101,10 +101,10 @@
             <h2 id="live-title" class="card__title">Live usage</h2>
             <p class="card__subtitle">
                 Samples from <code>{{ usage_url }}</code>, polled every 2 seconds{% if not history_url %} since this page opened (the backend has no history endpoint yet){% endif %}.
-                {% if governor_mode == "enforced" %}Values are read from each tenant's cgroup by the usage monitor.{% else %}Stub mode: these values are simulated by the StubGovernor, not measured.{% endif %}
+                {% if governor_mode in ("enforced", "unlimited") %}Values are read from each tenant's cgroup by the usage monitor.{% else %}Stub mode: these values are simulated by the StubGovernor, not measured.{% endif %}
             </p>
         </div>
-        {% if governor_mode == "enforced" %}{{ ui.badge("Measured", "success") }}{% else %}{{ ui.badge("Simulated", "warning") }}{% endif %}
+        {% if governor_mode in ("enforced", "unlimited") %}{{ ui.badge("Measured", "success") }}{% else %}{{ ui.badge("Simulated", "warning") }}{% endif %}
     </div>
     <p class="chart-notice" id="chart-notice" role="status">Waiting for the first sample…</p>
     <div class="chart-grid" id="chart-grid">
@@ -131,7 +131,7 @@
                 <p class="card__subtitle">
                     {% if throttle_url %}Recorded throttle events from the backend, newest first.{% else %}Throttling seen in the polled samples since this page opened, newest first. Older recorded events need a throttle-events endpoint (not built yet).{% endif %}
                     Each value is CPU time the kernel withheld during one sampling interval.
-                    {% if governor_mode != "enforced" %}<strong class="text-warning">Stub mode: these events are simulated, not measured.</strong>{% endif %}
+                    {% if governor_mode == "stub" %}<strong class="text-warning">Stub mode: these events are simulated, not measured.</strong>{% endif %}
                 </p>
             </div>
             <span class="badge badge--neutral" id="throttle-count" title="Events shown">0</span>
@@ -202,6 +202,8 @@
             <p class="card__subtitle">
                 {% if governor_mode == "enforced" %}
                     The Governor is assigning tenant sessions to their cgroups.
+                {% elif governor_mode == "unlimited" %}
+                    Limits off: tenant sessions are in their cgroups and measured, but cpu.max and memory.high are set to max.
                 {% else %}
                     How GateKeeper isolates tenants. In stub mode none of these controls are active.
                 {% endif %}

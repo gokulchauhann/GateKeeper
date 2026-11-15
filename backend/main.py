@@ -79,7 +79,7 @@ def require(request: Request, role: str):
 def render(request: Request, template: str, status_code: int = 200, **context):
     base = {
         "user": current_user(request),
-        "governor_mode": tenant_data.GOVERNOR_MODE,  # "enforced" only with the real Governor
+        "governor_mode": tenant_data.GOVERNOR_MODE,  # "enforced", "unlimited" or "stub"
         "data_source": "database",
         "warn_ratio": WARN_RATIO,
         "dev_mode": False,         # never true in the real backend
@@ -216,7 +216,7 @@ def admin_dashboard(request: Request):
         "throttled": sum(r["status"] == "throttled" for r in rows),
         "avg_cpu": sum(r["usage"]["cpu_percent"] for r in active) / len(active) if active else None,
     }
-    enforced = tenant_data.GOVERNOR_MODE == "enforced"   # stub mode stores no history
+    enforced = tenant_data.MEASURED   # stub mode stores no history
     return render(request, "admin/dashboard.html", active_page="admin", rows=rows, summary=summary,
                   updated_at=max((r["usage"]["timestamp"] for r in active), default=None),
                   usage_url="/admin/usage",
@@ -282,9 +282,11 @@ def change_plan(request: Request, tenant_id: int, body: PlanChange):
               "cpu_quota_percent": plan["cpu_quota_percent"],
               "memory_limit_mb": plan["memory_limit_mb"],
               "limits_applied": False, "cpu_max": None}
-    if tenant_data.GOVERNOR_MODE == "enforced":
+    if tenant_data.MEASURED:
         try:
             applied = tenant_data.governor.apply_limits(tenant_id)
+            # In unlimited mode cpu.max reads "max 100000"; the page then warns
+            # that it does not match the plan, which is the truth.
             result.update(limits_applied=True, cpu_max=applied["cpu_max"])
         except tenant_data._GOVERNOR_ERRORS as e:
             result["detail"] = f"Plan saved, but the cgroup limits were not updated: {e}"

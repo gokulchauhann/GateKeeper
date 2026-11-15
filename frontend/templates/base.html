@@ -54,6 +54,10 @@
         <div class="env-banner" role="note">
             <strong>Development mode.</strong> Usage values come from the StubGovernor and are simulated. No cgroup limits are being applied.
         </div>
+        {% elif governor_mode == "unlimited" %}
+        <div class="env-banner" role="note">
+            <strong>Limits off (baseline run).</strong> Tenants are placed in their cgroups and measured, but no CPU or memory limits are applied.
+        </div>
         {% endif %}
         <main id="main" class="content">
             {% block content %}{% endblock %}

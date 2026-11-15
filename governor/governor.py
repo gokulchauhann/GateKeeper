@@ -10,6 +10,8 @@ Built on Rohit's TenantGovernor. Phase 2 additions (docs/interface-contract.md):
 - get_tenant_usage() turns cgroup counters into per-interval usage numbers.
 
 Phase 3: apply_limits() rewrites a tenant's limits after a plan change, without a restart.
+TenantGovernor(enforce=False) does everything the same but writes "max" (no limit),
+for a fair enforcement-off baseline that is still measured through cpu.stat.
 
 Needs Linux with cgroups v2 and root (sudo).
 """
@@ -36,17 +38,19 @@ def cgroup_path(tenant_id: str) -> str:
     return os.path.join(CGROUP_ROOT, f"gatekeeper-tenant_{tenant_id}")
 
 
-def create_cgroup(tenant_id: str, cpu_quota_percent: int, memory_limit_mb: int) -> str:
-    """Creates the tenant's cgroup (if needed) and writes its CPU and memory limits."""
+def create_cgroup(tenant_id: str, cpu_quota_percent: int, memory_limit_mb: int,
+                  enforce: bool = True) -> str:
+    """Creates the tenant's cgroup (if needed) and writes its CPU and memory limits.
+    With enforce=False it writes "max" instead, so the tenant is measured but not limited."""
     path = cgroup_path(tenant_id)
     os.makedirs(path, exist_ok=True)
 
-    quota_us = cpu_quota_percent * CPU_PERIOD_US // 100
+    quota = str(cpu_quota_percent * CPU_PERIOD_US // 100) if enforce else "max"
     with open(os.path.join(path, "cpu.max"), "w") as f:
-        f.write(f"{quota_us} {CPU_PERIOD_US}")
+        f.write(f"{quota} {CPU_PERIOD_US}")
 
     with open(os.path.join(path, "memory.high"), "w") as f:
-        f.write(str(memory_limit_mb * 1024 * 1024))
+        f.write(str(memory_limit_mb * 1024 * 1024) if enforce else "max")
 
     return path
 
@@ -81,7 +85,8 @@ def _read_cpu_stat(path: str) -> dict:
 
 
 class TenantGovernor:
-    def __init__(self, minconn: int = 1, maxconn: int = 5):
+    def __init__(self, minconn: int = 1, maxconn: int = 5, enforce: bool = True):
+        self._enforce = enforce   # False: cgroups and accounting as usual, but no limits
         self._minconn = minconn
         self._maxconn = maxconn
         self._pools = {}
@@ -107,7 +112,7 @@ class TenantGovernor:
         limits = tenant_limits(tenant_id)
         if limits is None:
             raise GovernorConnectionError(f"unknown tenant {tenant_id}")
-        path = create_cgroup(tenant_id, *limits)
+        path = create_cgroup(tenant_id, *limits, enforce=self._enforce)
         with self._lock:
             self._cgroups[tenant_id] = path
         return path
@@ -141,7 +146,7 @@ class TenantGovernor:
         if limits is None:
             raise GovernorConnectionError(f"unknown tenant {tenant_id}")
         try:
-            path = create_cgroup(tenant_id, *limits)
+            path = create_cgroup(tenant_id, *limits, enforce=self._enforce)
             with open(os.path.join(path, "cpu.max")) as f:
                 cpu_max = f.read().strip()
             with open(os.path.join(path, "memory.high")) as f:

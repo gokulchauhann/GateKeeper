@@ -27,7 +27,9 @@
         // Only claim enforcement when the backend says the cgroup was applied.
         const note = cell("p", data.cgroup_enforced
             ? "Ran inside this tenant's cgroup. CPU and memory limits were enforced by the kernel."
-            : "Ran on the development stub. No cgroup limit was applied to this query.", "report__note");
+            : data.governor_mode === "unlimited"
+                ? "Ran inside this tenant's cgroup with limits off (baseline run). No CPU or memory limit was applied."
+                : "Ran on the development stub. No cgroup limit was applied to this query.", "report__note");
 
         const rows = Array.isArray(data.rows) ? data.rows : [];
         if (rows.length === 0) {

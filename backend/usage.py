@@ -7,6 +7,8 @@ tenant every MONITOR_INTERVAL seconds and stores the samples in usage_events
 transaction, so they share the same NOW() timestamp and can be matched up.
 The admin page reads the latest stored sample per tenant.
 
+GOVERNOR=unlimited works the same way (real cgroups, limits set to "max").
+
 GOVERNOR=stub: nothing is stored. The stub's random numbers are returned
 directly, and every page shows the "not enforced" banner.
 """
@@ -14,7 +16,7 @@ import logging
 import threading
 
 from backend.db import system_cursor
-from backend.tenant_data import GOVERNOR_MODE, governor
+from backend.tenant_data import MEASURED, governor
 
 MONITOR_INTERVAL = 2      # seconds between samples
 STALE_AFTER = 10          # a sample older than this means "no open session"
@@ -52,7 +54,7 @@ def start_monitor():
     """Starts the monitor only with the real Governor and only once it has
     get_tenant_usage() (Rohit's task). Otherwise does nothing."""
     global _thread
-    if GOVERNOR_MODE != "enforced" or not hasattr(governor, "get_tenant_usage"):
+    if not MEASURED or not hasattr(governor, "get_tenant_usage"):
         log.warning("usage monitor not started (stub mode or no get_tenant_usage yet)")
         return
     _stop.clear()
@@ -93,7 +95,7 @@ def _sample(r) -> dict:
 def latest_samples() -> dict:
     """{tenant_id: sample} in the interface-contract shape, for tenants with a
     recent sample. Tenants without one are idle and are left out."""
-    if GOVERNOR_MODE != "enforced":
+    if not MEASURED:
         return {t: governor.get_tenant_usage(str(t)) for t in tenant_ids()}
     with system_cursor() as cur:
         cur.execute("SELECT DISTINCT ON (u.tenant_id) * FROM (" + _SAMPLE_SELECT + """
@@ -107,7 +109,7 @@ def latest_samples() -> dict:
 def usage_history(minutes: int) -> list:
     """Every stored sample from the last `minutes` minutes, oldest first, for
     the admin charts. Empty in stub mode, where nothing is stored."""
-    if GOVERNOR_MODE != "enforced":
+    if not MEASURED:
         return []
     with system_cursor() as cur:
         cur.execute(_SAMPLE_SELECT + """
@@ -119,7 +121,7 @@ def usage_history(minutes: int) -> list:
 def throttle_events(limit: int) -> list:
     """The most recent throttle events, newest first, for the admin log.
     Timestamps match the usage samples, so the page does not list one twice."""
-    if GOVERNOR_MODE != "enforced":
+    if not MEASURED:
         return []
     with system_cursor() as cur:
         cur.execute("""
