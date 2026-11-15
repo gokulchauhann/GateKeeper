@@ -195,12 +195,11 @@ Currently in **Phase 3: Evaluation and Completion**.
 - [x] Usage-history and throttle-event endpoints: the admin charts and throttle log show stored data from before the page opened (Phase 3)
 - [x] Plan-tier changes from the admin page without a restart: `apply_limits()` rewrites `cpu.max` and `memory.high` on the running cgroup; a running report sped up from 20% to about 50% of a core after a Basic-to-Pro change (Phase 3)
 - [x] Enforcement-off mode (`GOVERNOR=unlimited`): same Governor and cgroups, limits set to `max`, for fair on/off comparisons (Phase 3)
-- [x] Noisy-neighbour comparison: under the same load, the other tenant's median page time was 45.9 ms with limits on against 87.5 ms with limits off (1.28× vs. 2.35× its quiet time) ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md), section 5)
+- [x] Noisy-neighbour comparison, 3 runs per mode: under the same load, the other tenant's median page time was 45.4 to 48.8 ms with limits on against 87.5 to 96.3 ms with limits off (on average 1.21× vs. 2.23× its quiet time) ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md), section 5)
 - [x] Dead-connection handling: health check on checkout, broken connections closed, 503 instead of a crash (Phase 3)
 - [x] Unit tests: 15 tests for the Governor and the measurement helpers (`tests/`)
 - [x] Demo script ([`docs/demo-script.md`](docs/demo-script.md)); Chart.js served from the repository, so the demo works offline
 - [x] `memory.high` test: the same 4,000,000-row sort ran in 10.8 s for a 4 GB tenant, while a 256 MB tenant was held at about 269 MB and slowed past a 180 s timeout, with no OOM kill and no PostgreSQL restart ([`docs/phase3-real-mode-results.md`](docs/phase3-real-mode-results.md), section 7)
-- [ ] Repeated noisy-neighbour runs
 
 ## Scope & Limitations
 
@@ -209,7 +208,7 @@ Currently in **Phase 3: Evaluation and Completion**.
 - **Single-machine demo** with simulated tenants, not a production deployment.
 - **Per-tenant pools are required.** Isolation depends on a connection never being shared between tenants; cross-tenant transaction pooling (as in PgBouncer's transaction mode) would break the PID-to-tenant mapping.
 - **`cpu.max` is a ceiling, not a reservation.** It stops one tenant taking too much, but does not add capacity. Proportional sharing with `cpu.weight` is future work.
-- **Cgroups limit CPU time per tenant, not every shared resource.** Tenants still share PostgreSQL's buffer cache, its background processes and disk I/O, so a small slowdown remains under load even with limits on (1.28× in our test).
+- **Cgroups limit CPU time per tenant, not every shared resource.** Tenants still share PostgreSQL's buffer cache, its background processes and disk I/O, so a small slowdown remains under load even with limits on (1.14× to 1.28× in our tests).
 - **Real mode runs the backend as root**, because of the cgroup writes. Moving those writes into a small privileged helper or a delegated cgroup subtree is future work.
 
 ## Future Work

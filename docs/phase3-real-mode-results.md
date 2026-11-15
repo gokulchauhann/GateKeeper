@@ -61,31 +61,35 @@ The CPU chart showed Acme's measured line flat along its dashed 20% quota line f
 
 ## 5. Noisy-neighbour test: limits on vs. off
 
-Measured with `scripts/noisy_neighbour.py` in a GitHub Codespace with 2 CPU cores, on 15 November 2026. The "off" run used `GOVERNOR=unlimited`: the real Governor, the same pools and the same cgroups, with `cpu.max` and `memory.high` set to `max`. So the two runs differ only in the limit.
+Measured with `scripts/noisy_neighbour.py` in a GitHub Codespace with 2 CPU cores, three runs per mode on 15 November 2026 (run 1 in an earlier session that day, runs 2 and 3 back to back). The "off" runs used `GOVERNOR=unlimited`: the real Governor, the same pools and the same cgroups, with `cpu.max` and `memory.high` set to `max`. So the two modes differ only in the limit.
 
 **Method.** The victim tenant, Globex (Pro plan), loads its orders page (a summary over its 100,000 orders) 20 times on a quiet system. Then the heavy tenant, Acme (Basic plan, 20%), runs 2 heavy reports at a time, one per core, and keeps starting new ones for 30 seconds, while Globex loads the same page again.
 
-**Globex's orders page:**
+**Globex's orders page, every run:**
 
-| | Limits off (`unlimited`) | Limits on (`real`) |
-|---|---|---|
-| Quiet system, median / p95 | 37.3 ms / 44.1 ms | 35.9 ms / 98.9 ms |
-| Under Acme's load, median / p95 | **87.5 ms** / 121.6 ms | **45.9 ms** / 75.1 ms |
-| Median slowdown under load | **2.35×** | **1.28×** |
-| Samples under load | 82 | 94 |
+| Mode | Run | Quiet, median / p95 | Under Acme's load, median / p95 | Median slowdown | Samples under load |
+|---|---|---|---|---|---|
+| Limits off | 1 | 37.3 / 44.1 ms | 87.5 / 121.6 ms | 2.35× | 82 |
+| Limits off | 2 | 43.3 / 51.6 ms | 96.2 / 141.6 ms | 2.22× | 80 |
+| Limits off | 3 | 45.3 / 77.3 ms | 96.3 / 137.6 ms | 2.13× | 80 |
+| Limits on | 1 | 35.9 / 98.9 ms | 45.9 / 75.1 ms | 1.28× | 94 |
+| Limits on | 2 | 39.8 / 63.4 ms | 45.4 / 76.5 ms | 1.14× | 94 |
+| Limits on | 3 | 40.2 / 67.6 ms | 48.8 / 71.1 ms | 1.21× | 94 |
 
-**Acme's heavy reports in the same runs:**
+**Averages of the three runs:**
 
 | | Limits off | Limits on |
 |---|---|---|
-| Reports finished | 10 | 2 |
-| Median duration | 7,118 ms | 79,435 ms |
+| Globex median under load | **93.3 ms** (87.5 to 96.3) | **46.7 ms** (45.4 to 48.8) |
+| Globex p95 under load | 133.6 ms (121.6 to 141.6) | 74.2 ms (71.1 to 76.5) |
+| Median slowdown vs. quiet | **2.23×** (2.13 to 2.35) | **1.21×** (1.14 to 1.28) |
+| Acme reports finished per run | 8 to 10, about 7.5 s each | 2, 52 to 79 s each |
 
-- **Enforcement protected the other tenant.** Under the same load, Globex's median response time was 45.9 ms with limits on against 87.5 ms with limits off, about half. Without limits, Acme's two reports took both cores and Globex slowed down 2.35 times.
-- **The heavy tenant paid for its own load.** With limits on, Acme's two concurrent reports shared its 20% of one core (about 10% each), so each took about 79 s.
-- **A small slowdown remains with limits on (1.28×).** Acme still uses its 20% of a core, and the tenants share PostgreSQL's buffer cache, its background processes and the backend process. Cgroups limit CPU time per tenant, not every shared resource.
-- **The p95 of the quiet phase in the "on" run (98.9 ms) was raised by an outlier**, so that run's p95 ratio (0.76×) does not mean the page got faster under load. The under-load values of the two runs are the fair comparison.
-- **Single run per mode** on a shared cloud machine. Repeating each mode would show how much the numbers vary.
+- **Enforcement protected the other tenant in every run.** Under the same load, Globex's median page time was 45.4 to 48.8 ms with limits on and 87.5 to 96.3 ms with limits off; the ranges do not overlap. On average, limits on halved Globex's response time under load (46.7 ms against 93.3 ms).
+- **The heavy tenant paid for its own load.** With limits off, Acme's two reports took both cores and finished 8 to 10 reports per run. With limits on, its two concurrent reports shared its 20% of one core (about 10% each), and only 2 finished per run.
+- **A small slowdown remains with limits on (1.14× to 1.28×).** Acme still uses its 20% of a core, and the tenants share PostgreSQL's buffer cache, its background processes and the backend process. Cgroups limit CPU time per tenant, not every shared resource.
+- **Acme's capped reports took 79.4 s in run 1 but 52.5 s in runs 2 and 3.** Run 1 was in an earlier session, and a Codespace can be placed on different cloud hardware between sessions (section 3 shows how much the machine affects throttled runs). Globex's numbers, the measure that matters here, were consistent across all three runs.
+- **The quiet-phase p95 of run 1 with limits on (98.9 ms) was raised by an outlier**, so p95 slowdown ratios are not compared; the under-load values are the fair comparison.
 
 ## 6. Plan change while a report runs
 
@@ -112,5 +116,4 @@ Measured with `scripts/memory_test.py` in the same Codespace (no swap). The scri
 
 ## Not yet tested
 
-- **Repeated noisy-neighbour runs** (section 5 is one run per mode).
 - **The plain-loop test on bare-metal Linux**, to confirm the 4.6 times factor in section 3 comes from the VM.

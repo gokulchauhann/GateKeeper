@@ -21,7 +21,7 @@ A step-by-step live demo of Gatekeeper, about 10 minutes. Any team member should
 | 4 | While it runs: Plan tiers form, Acme Corp to **Pro** | "The backend confirmed cpu.max = 50000 100000." Within a few seconds Acme's line jumps to about 50%. "We rewrote cpu.max on the running cgroup; the same query speeds up without a restart." |
 | 5 | Change Acme back to **Basic** | The line drops back toward 20%. |
 | 6 | Optional, terminal: `cat /sys/fs/cgroup/gatekeeper-tenant_1/cpu.max` and `cat /sys/fs/cgroup/gatekeeper-tenant_1/cgroup.procs` | The quota and Acme's real backend PIDs, straight from the kernel. |
-| 7 | Show the noisy-neighbour result (section 5 of the results) | "Under the same load from Acme, Globex's page took 87.5 ms with limits off and 45.9 ms with limits on." |
+| 7 | Show the noisy-neighbour result (section 5 of the results) | "Under the same load from Acme, Globex's page took about 93 ms with limits off and about 47 ms with limits on, in all three runs per mode." |
 
 ## Questions to be ready for
 
@@ -29,7 +29,7 @@ A step-by-step live demo of Gatekeeper, about 10 minutes. Any team member should
 - **Why not session pooling?** One pool per tenant means a connection never serves another tenant, so every PID belongs to one cgroup, and idle browser sessions do not hold connections.
 - **What if the database restarts?** Every checkout checks the connection (`SELECT 1`) and replaces dead ones; a request that loses its connection mid-way gets a 503, the next one works.
 - **Why `memory.high`, not `memory.max`?** Going over `memory.max` can get a backend killed, and PostgreSQL then restarts every connection. `memory.high` slows the tenant down instead (`scripts/memory_test.py`).
-- **Why is a small slowdown left with limits on (1.28×)?** Cgroups limit CPU time per tenant; tenants still share the buffer cache, PostgreSQL's background processes and disk I/O.
+- **Why is a small slowdown left with limits on (about 1.2×)?** Cgroups limit CPU time per tenant; tenants still share the buffer cache, PostgreSQL's background processes and disk I/O.
 - **What does not work yet?** Disk I/O limits, and the backend runs as root in real mode (see Future Work in the README).
 
 ## If something goes wrong
