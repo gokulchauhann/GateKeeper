@@ -12,7 +12,6 @@ directly, and every page shows the "not enforced" banner.
 """
 import logging
 import threading
-from datetime import timezone
 
 from backend.db import system_cursor
 from backend.tenant_data import GOVERNOR_MODE, governor
@@ -65,29 +64,72 @@ def stop_monitor():
     _stop.set()
 
 
+# Columns for one usage sample: a usage_events row and, if the tenant was
+# throttled in that cycle, the throttle_events row with the same timestamp
+# (both are written in one transaction, so they share NOW()).
+# Timestamps are stored without a time zone, so AT TIME ZONE attaches the
+# database's own zone; the result is correct on servers not set to UTC.
+_SAMPLE_SELECT = """
+    SELECT u.tenant_id, u.cpu_percent, u.memory_used_mb,
+           coalesce(th.throttled_ms, 0) AS throttled_ms,
+           u.recorded_at AT TIME ZONE current_setting('TimeZone') AS sampled_at
+    FROM usage_events u
+    LEFT JOIN throttle_events th
+           ON th.tenant_id = u.tenant_id AND th.occurred_at = u.recorded_at
+"""
+
+
+def _sample(r) -> dict:
+    """One row in the interface-contract usage shape."""
+    return {
+        "tenant_id": str(r["tenant_id"]),
+        "cpu_percent": round(r["cpu_percent"], 1),
+        "memory_used_mb": round(r["memory_used_mb"], 1),
+        "throttled_ms": r["throttled_ms"],
+        "timestamp": r["sampled_at"].isoformat(),
+    }
+
+
 def latest_samples() -> dict:
     """{tenant_id: sample} in the interface-contract shape, for tenants with a
     recent sample. Tenants without one are idle and are left out."""
     if GOVERNOR_MODE != "enforced":
         return {t: governor.get_tenant_usage(str(t)) for t in tenant_ids()}
     with system_cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT ON (u.tenant_id)
-                   u.tenant_id, u.cpu_percent, u.memory_used_mb,
-                   coalesce(th.throttled_ms, 0) AS throttled_ms, u.recorded_at
-            FROM usage_events u
-            LEFT JOIN throttle_events th
-                   ON th.tenant_id = u.tenant_id AND th.occurred_at = u.recorded_at
-            WHERE u.recorded_at > NOW() - make_interval(secs => %s)
-            ORDER BY u.tenant_id, u.recorded_at DESC""", (STALE_AFTER,))
+        cur.execute("SELECT DISTINCT ON (u.tenant_id) * FROM (" + _SAMPLE_SELECT + """
+                        WHERE u.recorded_at > NOW() - make_interval(secs => %s)
+                     ) u
+                     ORDER BY u.tenant_id, u.sampled_at DESC""", (STALE_AFTER,))
         rows = cur.fetchall()
-    return {r["tenant_id"]: {
-        "tenant_id": str(r["tenant_id"]),
-        "cpu_percent": round(r["cpu_percent"], 1),
-        "memory_used_mb": round(r["memory_used_mb"], 1),
-        "throttled_ms": r["throttled_ms"],
-        "timestamp": r["recorded_at"].replace(tzinfo=timezone.utc).isoformat(),
-    } for r in rows}
+    return {r["tenant_id"]: _sample(r) for r in rows}
+
+
+def usage_history(minutes: int) -> list:
+    """Every stored sample from the last `minutes` minutes, oldest first, for
+    the admin charts. Empty in stub mode, where nothing is stored."""
+    if GOVERNOR_MODE != "enforced":
+        return []
+    with system_cursor() as cur:
+        cur.execute(_SAMPLE_SELECT + """
+            WHERE u.recorded_at > NOW() - make_interval(mins => %s)
+            ORDER BY u.recorded_at, u.tenant_id""", (minutes,))
+        return [_sample(r) for r in cur.fetchall()]
+
+
+def throttle_events(limit: int) -> list:
+    """The most recent throttle events, newest first, for the admin log.
+    Timestamps match the usage samples, so the page does not list one twice."""
+    if GOVERNOR_MODE != "enforced":
+        return []
+    with system_cursor() as cur:
+        cur.execute("""
+            SELECT tenant_id, throttled_ms,
+                   occurred_at AT TIME ZONE current_setting('TimeZone') AS occurred_at
+            FROM throttle_events
+            ORDER BY occurred_at DESC
+            LIMIT %s""", (limit,))
+        return [{"tenant_id": str(r["tenant_id"]), "throttled_ms": r["throttled_ms"],
+                 "occurred_at": r["occurred_at"].isoformat()} for r in cur.fetchall()]
 
 
 def usage_status(sample, tenant: dict, warn_ratio: float) -> str:

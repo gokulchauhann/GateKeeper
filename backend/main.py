@@ -15,7 +15,8 @@ from dotenv import load_dotenv
 
 load_dotenv()  # must run before anything reads DATABASE_URL
 
-from fastapi import FastAPI, Form, Request  # noqa: E402
+from fastapi import FastAPI, Form, Query, Request  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 from fastapi.responses import JSONResponse, RedirectResponse, Response  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.templating import Jinja2Templates  # noqa: E402
@@ -183,6 +184,12 @@ def tenant_report(request: Request):
 
 # ---------- Admin ----------
 
+def all_plans() -> list:
+    with db.system_cursor() as cur:
+        cur.execute("SELECT name, cpu_quota_percent, memory_limit_mb FROM plan_tiers ORDER BY cpu_quota_percent")
+        return [dict(r) for r in cur.fetchall()]
+
+
 def all_tenants() -> list:
     with db.system_cursor() as cur:
         cur.execute("""SELECT t.id, t.name, p.name AS plan, p.cpu_quota_percent, p.memory_limit_mb
@@ -209,9 +216,14 @@ def admin_dashboard(request: Request):
         "throttled": sum(r["status"] == "throttled" for r in rows),
         "avg_cpu": sum(r["usage"]["cpu_percent"] for r in active) / len(active) if active else None,
     }
+    enforced = tenant_data.GOVERNOR_MODE == "enforced"   # stub mode stores no history
     return render(request, "admin/dashboard.html", active_page="admin", rows=rows, summary=summary,
                   updated_at=max((r["usage"]["timestamp"] for r in active), default=None),
-                  usage_url="/admin/usage")
+                  usage_url="/admin/usage",
+                  usage_history_url="/admin/usage/history?minutes=5" if enforced else None,
+                  throttle_events_url="/admin/throttle-events?limit=100" if enforced else None,
+                  plan_change_url="/admin/tenants/{tenant_id}/plan",
+                  plans=all_plans())
 
 
 @app.get("/admin/usage")
@@ -221,3 +233,61 @@ def admin_usage(request: Request):
     if user is None or user["role"] != "admin":
         return JSONResponse({"detail": "Admin access required."}, status_code=403)
     return list(usage.latest_samples().values())
+
+
+@app.get("/admin/usage/history")
+def admin_usage_history(request: Request, minutes: int = Query(5, ge=1, le=60)):
+    """Stored samples from the last `minutes` minutes, oldest first (for the charts)."""
+    user = current_user(request)
+    if user is None or user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required."}, status_code=403)
+    return usage.usage_history(minutes)
+
+
+@app.get("/admin/throttle-events")
+def admin_throttle_events(request: Request, limit: int = Query(100, ge=1, le=500)):
+    """The most recent throttle events, newest first (for the throttle log)."""
+    user = current_user(request)
+    if user is None or user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required."}, status_code=403)
+    return usage.throttle_events(limit)
+
+
+class PlanChange(BaseModel):
+    plan: str
+
+
+@app.post("/admin/tenants/{tenant_id}/plan")
+def change_plan(request: Request, tenant_id: int, body: PlanChange):
+    """Move a tenant to another plan tier and re-apply its cgroup limits at once.
+    The response says whether the limits reached the cgroup (limits_applied)
+    and what cpu.max now contains, read back from the kernel."""
+    user = current_user(request)
+    if user is None or user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required."}, status_code=403)
+
+    with db.system_cursor() as cur:
+        cur.execute("SELECT id, name, cpu_quota_percent, memory_limit_mb FROM plan_tiers WHERE name = %s",
+                    (body.plan,))
+        plan = cur.fetchone()
+        if plan is None:
+            return JSONResponse({"detail": f"Unknown plan '{body.plan}'."}, status_code=400)
+        cur.execute("UPDATE tenants SET plan_tier_id = %s WHERE id = %s RETURNING id",
+                    (plan["id"], tenant_id))
+        if cur.fetchone() is None:
+            return JSONResponse({"detail": f"Unknown tenant {tenant_id}."}, status_code=404)
+    # The plan is committed at this point; the cgroup is updated next.
+
+    result = {"tenant_id": str(tenant_id), "plan": plan["name"],
+              "cpu_quota_percent": plan["cpu_quota_percent"],
+              "memory_limit_mb": plan["memory_limit_mb"],
+              "limits_applied": False, "cpu_max": None}
+    if tenant_data.GOVERNOR_MODE == "enforced":
+        try:
+            applied = tenant_data.governor.apply_limits(tenant_id)
+            result.update(limits_applied=True, cpu_max=applied["cpu_max"])
+        except tenant_data._GOVERNOR_ERRORS as e:
+            result["detail"] = f"Plan saved, but the cgroup limits were not updated: {e}"
+    else:
+        result["detail"] = "Plan saved. Stub mode: no cgroup limits exist to update."
+    return result

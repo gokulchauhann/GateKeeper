@@ -9,6 +9,8 @@ Built on Rohit's TenantGovernor. Phase 2 additions (docs/interface-contract.md):
   than killing a backend (a killed backend makes Postgres restart every connection).
 - get_tenant_usage() turns cgroup counters into per-interval usage numbers.
 
+Phase 3: apply_limits() rewrites a tenant's limits after a plan change, without a restart.
+
 Needs Linux with cgroups v2 and root (sudo).
 """
 import os
@@ -127,6 +129,28 @@ class TenantGovernor:
             tenant_pool.putconn(conn, close=True)
             raise GovernorConnectionError(f"cgroup assignment failed for tenant {tenant_id}") from e
         return conn
+
+    def apply_limits(self, tenant_id) -> dict:
+        """Re-read the tenant's plan and rewrite cpu.max and memory.high on its
+        cgroup (creating the cgroup if the tenant has never connected).
+        Processes already in the cgroup get the new limit from the kernel's next
+        scheduling period, so a running query changes speed straight away.
+        Returns the values read back from the cgroup, as proof they were written."""
+        tenant_id = str(int(tenant_id))
+        limits = tenant_limits(tenant_id)
+        if limits is None:
+            raise GovernorConnectionError(f"unknown tenant {tenant_id}")
+        try:
+            path = create_cgroup(tenant_id, *limits)
+            with open(os.path.join(path, "cpu.max")) as f:
+                cpu_max = f.read().strip()
+            with open(os.path.join(path, "memory.high")) as f:
+                memory_high = f.read().strip()
+        except OSError as e:
+            raise GovernorConnectionError(f"could not write limits for tenant {tenant_id}") from e
+        with self._lock:
+            self._cgroups[tenant_id] = path
+        return {"cpu_max": cpu_max, "memory_high": memory_high}
 
     def release_connection(self, tenant_id, conn):
         self._pools[str(int(tenant_id))].putconn(conn)
